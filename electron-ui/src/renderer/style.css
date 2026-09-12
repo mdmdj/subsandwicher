@@ -1,0 +1,56 @@
+body {
+  font-family: system-ui, sans-serif;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  box-sizing: border-box;
+  background: #1e1e2f;
+  color: #ddd;
+}
+#dropzone {
+  border: 3px dashed #66a;
+  border-radius: 10px;
+  padding: 30px;
+  margin: 16px;
+  text-align: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+#dropzone.dragover {
+  background: rgba(120, 120, 220, 0.2);
+  border-color: #99f;
+}
+.hidden { display: none; }
+#actions { padding: 0 16px 16px; display: flex; flex-wrap: wrap; gap: 16px; flex: 1; align-content: flex-start; }
+.streamlist { flex: 1 1 320px; max-height: 44vh; overflow-y: auto; border: 1px solid #444; border-radius: 8px; padding: 8px 12px; }
+.streamlist h2 { font-size: 15px; margin: 4px 0 10px; color: #99c; }
+.streamlist label {
+  display: block;
+  padding: 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.streamlist label:hover { background: rgba(255,255,255,0.06); }
+.streamlist label.checked { background: rgba(120,120,220,0.15); border-color: #88a; }
+.streamlist input { margin-right: 8px; }
+button {
+  font-size: 15px;
+  padding: 8px 16px;
+  border: 1px solid #556;
+  border-radius: 8px;
+  background: #28283d;
+  color: #ddd;
+  cursor: pointer;
+}
+button:hover { background: #32324a; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+#btn-save { background: #2b4d3a; border-color: #3a6f4d; }
+#btn-save:hover { background: #356049; }
+#status { width: 100%; font-size: 13px; color: #cbb; min-height: 18px; }
+#progwrap { width: 100%; height: 8px; background: #33334d; border-radius: 4px; overflow: hidden; }
+#progbar { height: 100%; width: 0%; background: #7a7ae0; transition: width 0.12s linear; }
+#error { color: #f99; }
+#logline { width: 100%; font-size: 12px; color: #889; cursor: pointer; }

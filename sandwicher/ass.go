@@ -1,4 +1,4 @@
-package main
+package sandwicher
 
 import (
 	"fmt"
@@ -412,8 +412,16 @@ func buildSecondaryRenames(prim, sec *ASSDoc, suffix string) map[string]string {
 	return renames
 }
 
+// LineEvent is a merged dialogue line exposed to GUI clients, in seconds.
+type LineEvent struct {
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
+	Lang  string  `json:"lang"` // which track the line came from
+	Text  string  `json:"text,omitempty"`
+}
+
 // mergeAndWrite applies all transformations and writes the merged .ass file.
-func mergeAndWrite(prim, sec *ASSDoc, lang2 string, scale float64, outPath string) (nStyles, nLines int, err error) {
+func mergeAndWrite(prim, sec *ASSDoc, lang2 string, scale float64, outPath string) (nStyles, nLines int, events []LineEvent, err error) {
 	// Primary: top-aligned -> bottom-aligned (horizontal kept), middle -> middle-left.
 	for _, s := range prim.Styles {
 		transformStyleAlignment(s, false)
@@ -447,6 +455,23 @@ func mergeAndWrite(prim, sec *ASSDoc, lang2 string, scale float64, outPath strin
 	lines = append(lines, sec.Dialogues...)
 	sort.SliceStable(lines, func(i, j int) bool { return lines[i].startCS < lines[j].startCS })
 
+	takes := map[string]bool{} // style names moved to the secondary track
+	for _, nn := range renames {
+		takes[nn] = true
+	}
+	for _, d := range lines {
+		lang := "primary"
+		if takes[d.Style] {
+			lang = "secondary"
+		}
+		events = append(events, LineEvent{
+			Start: float64(d.startCS) / 100,
+			End:   float64(parseTimeCS(d.End)) / 100,
+			Lang:  lang,
+			Text:  assTextPreview(d.Text),
+		})
+	}
+
 	var b strings.Builder
 	b.WriteString("[Script Info]\n")
 	for _, l := range prim.InfoRaw {
@@ -477,9 +502,22 @@ func mergeAndWrite(prim, sec *ASSDoc, lang2 string, scale float64, outPath strin
 	}
 
 	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
-	return len(prim.Styles) + len(sec.Styles), len(lines), nil
+	return len(prim.Styles) + len(sec.Styles), len(lines), events, nil
+}
+
+var (
+	reTagBlock = regexp.MustCompile(`\{\\[^}]*\}`)
+	reTag      = regexp.MustCompile(`\\[nN]`)
+)
+
+// assTextPreview strips ASS override tags and converts line breaks for a
+// human-readable preview shown in the UI stream list.
+func assTextPreview(text string) string {
+	text = reTagBlock.ReplaceAllString(text, "")
+	text = reTag.ReplaceAllString(text, " ")
+	return strings.TrimSpace(text)
 }
 
 func writeStyleLine(b *strings.Builder, s *ASSStyle) {

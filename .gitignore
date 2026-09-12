@@ -1,4 +1,11 @@
-*.mkv
 *.ass
-subsandwicher
+.cache/
+*.db
+dist/
+electron-ui/dist/
 *.exe
+*.mkv
+node_modules/
+subsandwicher
+third_party/bin/
+vendor/

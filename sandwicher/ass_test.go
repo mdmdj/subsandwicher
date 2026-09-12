@@ -1,4 +1,4 @@
-package main
+package sandwicher
 
 import (
 	"os"
@@ -74,7 +74,7 @@ func TestLanguageCandidates(t *testing.T) {
 }
 
 func TestPickTrack(t *testing.T) {
-	streams := []stream{
+	streams := []Stream{
 		{Index: 0, CodecType: "subtitle", CodecName: "subrip", Tags: map[string]string{"language": "eng", "title": "English SDH"}},
 		{Index: 1, CodecType: "subtitle", CodecName: "ass", Tags: map[string]string{"language": "eng", "title": "English (main)"}},
 		{Index: 2, CodecType: "subtitle", CodecName: "hdmv_pgs_subtitle", Tags: map[string]string{"language": "eng", "title": "English PGS"}},
@@ -83,26 +83,26 @@ func TestPickTrack(t *testing.T) {
 	}
 
 	// SDH track skipped, bitmap track excluded
-	s, err := pickTrack(streams, "en", -1, "primary")
+	s, err := PickTrack(streams, "en", -1, "primary")
 	if err != nil || s.Index != 1 {
-		t.Errorf("pickTrack(en) = %v, %v; want stream 1", s, err)
+		t.Errorf("PickTrack(en) = %v, %v; want stream 1", s, err)
 	}
 	// non-SDH preferred among jpn
-	if s, _ := pickTrack(streams, "jpn", -1, "x"); s.Index != 4 {
-		t.Errorf("pickTrack(jpn) = stream %d, want 4", s.Index)
+	if s, _ := PickTrack(streams, "jpn", -1, "x"); s.Index != 4 {
+		t.Errorf("PickTrack(jpn) = stream %d, want 4", s.Index)
 	}
 	// override index wins even if SDH
-	if s, _ := pickTrack(streams, "en", 0, "x"); s.Index != 0 {
-		t.Errorf("pickTrack(en, override 0) = stream %d, want 0", s.Index)
+	if s, _ := PickTrack(streams, "en", 0, "x"); s.Index != 0 {
+		t.Errorf("PickTrack(en, override 0) = stream %d, want 0", s.Index)
 	}
 	// override to bitmap must fail
-	if _, err := pickTrack(streams, "en", 2, "x"); err == nil {
-		t.Error("pickTrack(en, override bitmap) should fail")
+	if _, err := PickTrack(streams, "en", 2, "x"); err == nil {
+		t.Error("PickTrack(en, override bitmap) should fail")
 	}
 	// bitmap-only language must fail with out-of-scope error
-	pgs := []stream{{Index: 9, CodecType: "subtitle", CodecName: "hdmv_pgs_subtitle", Tags: map[string]string{"language": "kor"}}}
-	if _, err := pickTrack(pgs, "ko", -1, "x"); err == nil || !strings.Contains(err.Error(), "out of scope") {
-		t.Errorf("pickTrack(bitmap only) err = %v, want out-of-scope error", err)
+	pgs := []Stream{{Index: 9, CodecType: "subtitle", CodecName: "hdmv_pgs_subtitle", Tags: map[string]string{"language": "kor"}}}
+	if _, err := PickTrack(pgs, "ko", -1, "x"); err == nil || !strings.Contains(err.Error(), "out of scope") {
+		t.Errorf("PickTrack(bitmap only) err = %v, want out-of-scope error", err)
 	}
 }
 
@@ -145,7 +145,7 @@ func TestParseAndMerge(t *testing.T) {
 	}, "\n")))
 
 	out := filepath.Join(t.TempDir(), "out.ass")
-	nStyles, nLines, err := mergeAndWrite(prim, sec, "en", rescaleFactor(prim, sec), out)
+	nStyles, nLines, _, err := mergeAndWrite(prim, sec, "en", rescaleFactor(prim, sec), out)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,0 +1,17 @@
+{
+  "name": "subsandwicher-gui",
+  "productName": "SubSandwicher",
+  "version": "0.1.0",
+  "description": "Merged-subtitle preview sandbox for subsandwicher",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "44.3.0"
+  },
+  "dependencies": {
+    "7zip-bin-full": "^26.3.1"
+  }
+}

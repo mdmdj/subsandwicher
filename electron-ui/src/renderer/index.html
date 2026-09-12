@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';">
+  <title>SubSandwicher</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="dropzone">
+    <h1>Drop a video file here</h1>
+    <p id="filename"></p>
+  </div>
+
+  <div id="actions" class="hidden">
+    <div id="primary-streams" class="streamlist">
+      <h2>Primary (bottom, main text)</h2>
+      <div id="primaryOptions"></div>
+    </div>
+
+    <div id="secondary-streams" class="streamlist">
+      <h2>Secondary (top text)</h2>
+      <div id="secondaryOptions"></div>
+    </div>
+
+    <button id="btn-preview">Generate preview</button>
+    <button id="btn-other-frame">Another frame</button>
+    <button id="btn-save">Looks right — save merged subs</button>
+    <div id="progwrap" class="hidden"><div id="progbar"></div></div>
+    <div id="status"></div>
+    <div id="logline"></div>
+  </div>
+
+  <script src="index.js"></script>
+</body>
+</html>
