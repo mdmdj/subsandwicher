@@ -28,7 +28,11 @@ subsandwicher-cli merge --video <path> --primary-index N --secondary-index M \
 The transaction is merge-in-TEMP and save-on-confirm: nothing is ever written
 next to the video until the user confirms.
 
-The CLI's stdout (JSON) is the app's contract for everything else:
+The CLI's stderr carries machine lines the controller parses: throttled
+`{"role"...,"overall":0..1,"step","seconds","total_seconds"}` progress
+(merged extraction steps: primary first half, secondary second half; UI
+redraws at ~10fps), and one `{"event":"bin","path":...}` line proving the
+exact vendored binary used. The stdout payload is:
 
 ```
 {"out":"...ass","styles":3,"lines":522,

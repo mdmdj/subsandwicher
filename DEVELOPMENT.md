@@ -31,7 +31,10 @@ Three processes, three owners:
 - **Go CLI**: all subtitle logic. `probe` and `merge` are JSON on stdout; progress lines on stderr. Called as a subprocess; runs in a kill-on-close Job Object on Windows so closing the UI reaps ffmpeg/mpv too.
 - **mpv**: playback + libass rendering in its own window, driven over JSON IPC (`--input-ipc-server=<pipe>`; use the `=` form — newer mpv rejects the space form on Windows). `--no-config` so user profiles can't interfere; kiosk-ish (`--osd-level=0 --osc=no --input-default-bindings=no`).
 
-Never do subtitle logic in JS, never do UI logic in Go.
+Never do subtitle logic in JS, never do UI logic in Go. Both the GUI and the
+CLI resolve their binaries (`SUBS_BIN_*` env -> app tree -> `PATH`); the CLI
+logs the concrete path with `{"event":"bin",...}` so a report log always shows
+which binary actually ran.
 
 ## Binaries
 

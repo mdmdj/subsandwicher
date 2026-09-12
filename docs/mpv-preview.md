@@ -58,6 +58,14 @@ builds are git snapshots; a **date changing pin is a version change** — if a
 new build changes behavior, investigate the mpv changelog between the git
 revs listed in the release description before bumping.
 
+## Lifecycle ownership
+
+The CLI runs in a named kill-on-close Job Object (`subsandwicher-job-<pid>`,
+see sandwicher/job_windows.go) so process-tree tools can attribute the chain
+and closing the UI kills any in-flight extraction. mpv itself is a direct
+child of the Electron main process; at quit the controller `taskkill /F /T`
+(or POSIX process-group TERM) reaps whichever of mpv/CLI was mid-flight.
+
 ## Auto-relaunch
 
 If the user (or anything) kills mpv, the session object marks itself
