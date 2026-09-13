@@ -25,8 +25,7 @@ subsandwicher-cli merge --video <path> --primary-index N --secondary-index M \
                         --out <temp dir>\merge-N-M.ass
 ```
 
-The transaction is merge-in-TEMP and 
--on-confirm: nothing is ever written
+The transaction is merge-in-TEMP and save-on-confirm: nothing is ever written
 next to the video until the user confirms.
 
 The CLI's stderr carries machine lines the controller parses: throttled
