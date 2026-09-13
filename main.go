@@ -168,7 +168,7 @@ func cmdLangMerge(args []string, defaultMode bool) error {
 		return fmt.Errorf("primary and secondary resolved to the same subtitle stream (%d)", prim.Index)
 	}
 	outPath := filepath.Join(filepath.Dir(video),
-		strings.TrimSuffix(filepath.Base(video), filepath.Ext(video))+"-"+lang1+"_"+lang2+".ass")
+		strings.TrimSuffix(filepath.Base(video), filepath.Ext(video))+"."+lang1+"-"+lang2+".ass")
 	stats, err := sandwicher.MergeTracks(video, prim.Index, sec.Index, outPath, nil)
 	if err != nil {
 		return err

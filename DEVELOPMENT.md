@@ -31,7 +31,10 @@ Three processes, three owners:
 - **Go CLI**: all subtitle logic. `probe` and `merge` are JSON on stdout; progress lines on stderr. Called as a subprocess; runs in a kill-on-close Job Object on Windows so closing the UI reaps ffmpeg/mpv too.
 - **mpv**: playback + libass rendering in its own window, driven over JSON IPC (`--input-ipc-server=<pipe>`; use the `=` form — newer mpv rejects the space form on Windows). `--no-config` so user profiles can't interfere; kiosk-ish (`--osd-level=0 --osc=no --input-default-bindings=no`).
 
-Never do subtitle logic in JS, never do UI logic in Go.
+Never do subtitle logic in JS, never do UI logic in Go. The Electron GUI resolves its CLI/mpv paths via `SUBS_BIN_*` -> app tree -> `PATH`; it does not pass
+  its ffmpeg/ffprobe paths to the CLI. The Go CLI resolves ffprobe/ffmpeg relative to its own executable
+  (vendored tree -> executable directory -> `PATH`). TODO: make the CLI honor/pass overrides and emit one
+  `{"event":"bin",...}` record per tool; currently overrides are ignored by the CLI and logging is once-only.
 
 ## Binaries
 
