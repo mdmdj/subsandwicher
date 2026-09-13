@@ -60,11 +60,6 @@ revs listed in the release description before bumping.
 
 ## Lifecycle ownership
 
-The CLI runs in a named kill-on-close Job Object (`subsandwicher-job-<pid>`,
-see sandwicher/job_windows.go) so process-tree tools can attribute the chain
-and closing the UI kills any in-flight extraction. mpv itself is a direct
-## Lifecycle ownership
-
 The CLI is a separate child of Electron. On POSIX it is spawned as a
 separate process group; on Windows it creates a named kill-on-close Job
 Object (`subsandwicher-job-<pid>`, see `sandwicher/job_windows.go`) containing
