@@ -79,7 +79,7 @@ function runCli(args, opts = {}) {
 }
 
 function defaultMergedPath(videoPath, primaryIndex, secondaryIndex) {
-  return tempFile(`merge-${primaryIndex}-${secondaryIndex}.ass`);
+  return tempFile(`merge.${primaryIndex}-${secondaryIndex}.ass`);
 }
 
 function extensionlessBase(videoPath) {
@@ -185,11 +185,11 @@ function destMergedPath(videoPath, primaryLang, secondaryLang) {
   const base = extensionlessBase(videoPath);
   const dir = path.dirname(videoPath);
   if (primaryLang && secondaryLang) {
-    return path.join(dir, `${base}-${primaryLang}_${secondaryLang}.ass`);
+    return path.join(dir, `${base}.${primaryLang}-${secondaryLang}.ass`);
   } else if (primaryLang) {
-    return path.join(dir, `${base}-${primaryLang}.ass`);
+    return path.join(dir, `${base}.${primaryLang}.ass`);
   } else {
-    return path.join(dir, `${base}-merged.ass`);
+    return path.join(dir, `${base}.merged.ass`);
   }
 }
 
