@@ -10,24 +10,119 @@
   <div id="dropzone">
     <h1>Drop a video file here</h1>
     <p id="filename"></p>
+    <p id="dropstatus"></p>
+    <p id="droperror"></p>
   </div>
 
   <div id="actions" class="hidden">
-    <div id="primary-streams" class="streamlist">
-      <h2>Primary (bottom, main text)</h2>
-      <div id="primaryOptions"></div>
+    <div id="topbar">
+      <div id="topbar-name"></div>
+      <div class="topbar-actions">
+        <button id="btn-change-langs" class="small hidden">Change languages</button>
+        <button id="btn-eject" class="small">Eject</button>
+        <button id="btn-save" class="primary hidden">Save merged subs</button>
+      </div>
     </div>
 
-    <div id="secondary-streams" class="streamlist">
-      <h2>Secondary (top text)</h2>
-      <div id="secondaryOptions"></div>
+    <div id="setup">
+      <div id="lang-summary" class="lang-summary hidden">
+        <span id="lang-summary-text"></span>
+        <button id="btn-change-langs-summary" class="small">Change languages</button>
+      </div>
+      <div id="lang-lists">
+        <div id="primary-streams" class="streamlist">
+          <h2>Primary (bottom, main text)</h2>
+          <div id="primaryOptions"></div>
+        </div>
+        <div id="secondary-streams" class="streamlist">
+          <h2>Secondary (top text)</h2>
+          <div id="secondaryOptions"></div>
+        </div>
+      </div>
+      <div class="setup-actions">
+        <button id="btn-preview">Generate preview</button>
+      </div>
     </div>
 
-    <button id="btn-preview">Generate preview</button>
-    <button id="btn-other-frame">Another frame</button>
-    <button id="btn-save">Looks right — save merged subs</button>
     <div id="progwrap" class="hidden"><div id="progbar"></div></div>
     <div id="status"></div>
+
+    <section id="review" class="hidden">
+      <div class="review-head">
+        <div class="review-title">
+          <h2>Review conflicts</h2>
+          <div id="review-summary"></div>
+        </div>
+        <div class="review-filters">
+          <label>Show
+            <select id="filter-surface">
+              <option value="review">Review + required</option>
+              <option value="required">Required only</option>
+              <option value="all">All windows</option>
+            </select>
+          </label>
+          <label>Cause
+            <select id="filter-cause"><option value="">All causes</option></select>
+          </label>
+          <label>Status
+            <select id="filter-status">
+              <option value="">All statuses</option>
+              <option value="open">Open</option>
+              <option value="done">Done</option>
+              <option value="again">Check again</option>
+            </select>
+          </label>
+          <button id="btn-copy-all">Copy all state</button>
+        </div>
+      </div>
+      <div class="review-body">
+        <div id="window-list"></div>
+        <div id="window-detail">
+          <div id="window-empty">No conflict windows. Nothing to review.</div>
+          <div id="window-content" class="hidden">
+            <div id="playback" class="playback">
+              <button id="btn-play-window" class="icon-btn" title="Play window" aria-label="Play window"></button>
+              <button id="btn-pause-window" class="icon-btn" title="Pause (hold this frame)" aria-label="Pause" disabled></button>
+              <button id="btn-stop-window" class="icon-btn" title="Stop" aria-label="Stop" disabled></button>
+              <label><input type="checkbox" id="opt-loop" checked> Loop</label>
+              <label><input type="checkbox" id="opt-unmute"> Unmute</label>
+              <label>Speed
+                <select id="opt-speed">
+                  <option value="0.25">0.25x</option>
+                  <option value="0.5">0.5x</option>
+                  <option value="0.75">0.75x</option>
+                  <option value="1" selected>1x</option>
+                  <option value="1.25">1.25x</option>
+                  <option value="1.5">1.5x</option>
+                  <option value="2">2x</option>
+                </select>
+              </label>
+              <button id="btn-other-frame" class="small minor icon-btn" title="Random frame" aria-label="Random frame"></button>
+              <span class="toolbar-spacer"></span>
+              <span id="window-status-badge"></span>
+              <button id="btn-done" class="icon-btn" title="Mark done" aria-label="Mark done"></button>
+              <button id="btn-again" class="icon-btn" title="Check again" aria-label="Check again"></button>
+              <span id="play-state"></span>
+              <div id="window-progress" class="window-progress" role="progressbar"
+                   aria-label="Playback position in this conflict window"
+                   aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div id="window-progress-fill" class="window-progress-fill"></div>
+              </div>
+            </div>
+            <div id="window-meta"></div>
+            <div id="window-suggestions"></div>
+            <label class="note-label">Your comment (included in Copy state)
+              <textarea id="review-note" rows="2" placeholder="e.g. this sign should stay next to the shop label; the upper line is fine"></textarea>
+            </label>
+            <div class="review-actions">
+              <button id="btn-preview-window">Preview window</button>
+              <button id="btn-copy-window">Copy state for report</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <div id="logline"></div>
   </div>
 

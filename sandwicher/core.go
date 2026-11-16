@@ -50,13 +50,35 @@ type Stream struct {
 	Tags      map[string]string `json:"tags,omitempty"`
 }
 
-// Progress is the per-step extraction progress emitted by MergeTracks.
+// Progress is one loading step. Overall is the weighted fraction of the whole
+// merge pipeline, not just extraction.
 type Progress struct {
-	Role      string  `json:"role"`    // "primary" or "secondary"
-	Overall   float64 `json:"overall"` // 0..1 across both extraction steps
-	Step      float64 `json:"step"`    // 0..1 within the current extraction
-	Seconds   float64 `json:"seconds"` // processed so far in current step
-	TotalSecs float64 `json:"total_seconds"`
+	Stage         string  `json:"stage"` // probe | extract | merge | analyze | exact | report | review | done
+	Role          string  `json:"role,omitempty"`
+	Message       string  `json:"message,omitempty"`
+	Overall       float64 `json:"overall"` // 0..1 across the whole pipeline
+	Step          float64 `json:"step"`    // 0..1 within the current stage
+	Seconds       float64 `json:"seconds"`
+	TotalSecs     float64 `json:"total_seconds"`
+	Indeterminate bool    `json:"indeterminate,omitempty"` // busy but no reliable fraction
+}
+
+const (
+	stageProbeStart   = 0.00
+	stagePrimaryStart = 0.02
+	stageSecondStart  = 0.31
+	stageMergeStart   = 0.62
+	stageAnalyzeStart = 0.66
+	stageExactStart   = 0.70
+	stageReportStart  = 0.94
+	stageReviewStart  = 0.97
+	stageDone         = 1.00
+)
+
+func emitProgress(fn func(Progress), p Progress) {
+	if fn != nil {
+		fn(p)
+	}
 }
 
 // IsBitmap reports whether the stream is an image-based subtitle format.
@@ -216,17 +238,39 @@ func PickTrack(streams []Stream, code string, overrideIdx int, role string) (*St
 		return nil, fmt.Errorf("%s: no text subtitle track for language %q (available: %s)", role, code, strings.Join(have, "; "))
 	}
 
-	// Prefer tracks whose title does not indicate SDH, then lowest index.
+	// Prefer the full dialogue track over forced/signs/SDH tracks, then lowest
+	// index. Titles are unreliable, so they only nudge the order; an explicit
+	// index still wins.
 	sort.SliceStable(matches, func(i, j int) bool {
-		sdh := func(s Stream) bool { return strings.Contains(strings.ToLower(s.Title()), "sdh") }
-		if sdh(matches[i]) != sdh(matches[j]) {
-			return !sdh(matches[i])
+		si := titleScore(matches[i].Title())
+		sj := titleScore(matches[j].Title())
+		if si != sj {
+			return si > sj
 		}
 		return matches[i].Index < matches[j].Index
 	})
 	chosen := matches[0]
 	fmt.Fprintf(os.Stderr, "%s: stream #%d (%s, lang=%s, title=%q)\n", role, chosen.Index, chosen.CodecName, chosen.Lang(), chosen.Title())
 	return &chosen, nil
+}
+
+// titleScore ranks subtitle tracks by what their title says they contain.
+// Negative titles are partial tracks (signs, forced, songs), positive ones are
+// complete dialogue tracks. It is a hint, never a hard filter.
+func titleScore(title string) int {
+	t := strings.ToLower(title)
+	score := 0
+	for _, bad := range []string{"sign", "forced", "karaoke", "songs", "lyrics", "sdh", "closed caption", "(cc)"} {
+		if strings.Contains(t, bad) {
+			score -= 3
+		}
+	}
+	for _, good := range []string{"full", "dialogue", "main", "complete"} {
+		if strings.Contains(t, good) {
+			score += 2
+		}
+	}
+	return score
 }
 
 // ProbeDuration returns the container duration in seconds via ffprobe.
@@ -332,15 +376,24 @@ func progressFraction(t, duration float64) float64 {
 
 // MergeStats is what the CLI `merge` subcommand prints to stdout.
 type MergeStats struct {
-	OutPath string      `json:"out"`
-	Styles  int         `json:"styles"`
-	Lines   int         `json:"lines"`
-	Events  []LineEvent `json:"events"`
+	OutPath         string      `json:"out"`
+	Styles          int         `json:"styles"`
+	Lines           int         `json:"lines"`
+	Events          []LineEvent `json:"events"`
+	ReportPath      string      `json:"report_path,omitempty"`
+	Conflicts       int         `json:"conflicts"`
+	ConflictWindows int         `json:"conflict_windows"`
+	ReviewRequired  int         `json:"review_required"`
+	Exact           bool        `json:"exact"`
+	ExactEvents     int         `json:"exact_events"`
 }
 
-// MergeTracks probes, extracts, merges and writes out. onProgress may be nil;
-// when set it receives (role, seconds} during extraction.
-func MergeTracks(video string, primary, secondary int, outPath string, reportProgress func(p Progress)) (*MergeStats, error) {
+// MergeTracks probes, extracts, merges and writes out. reportPath may be empty,
+// in which case the decision log is written next to the output. onProgress may
+// be nil; when set it receives (role, seconds} during extraction.
+func MergeTracks(video string, primary, secondary int, outPath, reportPath string, exact bool, reportProgress func(p Progress)) (*MergeStats, error) {
+	emitProgress(reportProgress, Progress{Stage: "probe", Overall: stageProbeStart, Indeterminate: true,
+		Message: "probing subtitle streams…"})
 	streams, err := ProbeSubtitleStreams(video)
 	if err != nil {
 		return nil, err
@@ -363,20 +416,19 @@ func MergeTracks(video string, primary, secondary int, outPath string, reportPro
 	}
 	defer os.RemoveAll(tmpDir)
 
+	emitProgress(reportProgress, Progress{Stage: "probe", Overall: stagePrimaryStart, Step: 1,
+		Message: "subtitle streams found; reading duration…"})
 	duration := ProbeDuration(video)
-	phaseIdx := func(role string) float64 {
-		if role == "secondary" {
-			return 1
-		}
-		return 0
-	}
 	tick := func(role string) func(seconds, frac float64) {
-		if reportProgress == nil {
-			return nil
+		start, span := stagePrimaryStart, stageSecondStart-stagePrimaryStart
+		if role == "secondary" {
+			start, span = stageSecondStart, stageMergeStart-stageSecondStart
 		}
 		return func(seconds, frac float64) {
-			reportProgress(Progress{Role: role, Overall: (phaseIdx(role) + frac) / 2,
-				Step: frac, Seconds: seconds, TotalSecs: duration})
+			emitProgress(reportProgress, Progress{Stage: "extract", Role: role,
+				Overall: start + frac*span, Step: frac, Seconds: seconds, TotalSecs: duration,
+				Message: fmt.Sprintf("extracting %s subtitles — %s of %s", role,
+					formatClock(seconds), formatClock(duration))})
 		}
 	}
 
@@ -401,9 +453,55 @@ func MergeTracks(video string, primary, secondary int, outPath string, reportPro
 		lang2 = fmt.Sprintf("s%d", sec.Index)
 	}
 
-	stats, lines, events, err := mergeAndWrite(primDoc, secDoc, lang2, scale, outPath)
+	emitProgress(reportProgress, Progress{Stage: "merge", Overall: stageMergeStart, Indeterminate: true,
+		Message: "merging tracks and writing the working subtitle file…"})
+	status, lines, events, rep, err := mergeAndWrite(primDoc, secDoc, lang2, scale, outPath, JobInfo{
+		ID:              fmt.Sprintf("%d-%d", time.Now().Unix(), os.Getpid()),
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		Video:           video,
+		Out:             outPath,
+		PrimaryLang:     prim.Lang(),
+		SecondaryLang:   sec.Lang(),
+		PrimaryIndex:    prim.Index,
+		SecondaryIndex:  sec.Index,
+		TrackSource:     "provenance",
+		TrackConfidence: 1,
+		TrackNote:       "primary and secondary chosen in the UI",
+		Generator:       "subsandwicher",
+	}, exact, reportProgress)
 	if err != nil {
 		return nil, err
 	}
-	return &MergeStats{OutPath: outPath, Styles: stats, Lines: lines, Events: events}, nil
+
+	if reportPath == "" {
+		reportPath = outPath + ".report.json"
+	}
+	emitProgress(reportProgress, Progress{Stage: "report", Overall: stageReportStart, Indeterminate: true,
+		Message: "writing the decision log…"})
+	if err := WriteReport(reportPath, rep); err != nil {
+		return nil, fmt.Errorf("writing decision log: %w", err)
+	}
+	emitProgress(reportProgress, Progress{Stage: "review", Overall: stageReviewStart, Indeterminate: true,
+		Message: "preparing the review…"})
+	return &MergeStats{
+		OutPath:         outPath,
+		Styles:          status,
+		Lines:           lines,
+		Events:          events,
+		ReportPath:      reportPath,
+		Conflicts:       rep.Summary.Conflicts,
+		ConflictWindows: rep.Summary.Windows,
+		ReviewRequired:  rep.Summary.RequiredEvents,
+		Exact:           rep.Job.Exact,
+		ExactEvents:     rep.Job.ExactEvents,
+	}, nil
+}
+
+// formatClock renders loading-progress times as m:ss.s.
+func formatClock(sec float64) string {
+	if sec < 0 {
+		sec = 0
+	}
+	total := int(sec)
+	return fmt.Sprintf("%d:%04.1f", total/60, sec-float64(total/60*60))
 }

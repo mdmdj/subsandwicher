@@ -5,15 +5,23 @@ log when it does not.
 
 ## 1. Drop a video
 
-Renderer gets a `drop` event; `webUtils.getPathForFile()` (in preload,
-contract-isolated) resolves the real path. The controller then runs
-`subsandwicher-cli probe --video=<path>` and renders one radio per
+The load state is a full-window drop target. Renderer gets a `drop` event;
+`webUtils.getPathForFile()` (in preload, contract-isolated) resolves the real
+path. The controller then runs `subsandwicher-cli probe --video=<path>` and
+renders one radio per
 text subtitle stream, labeled from mkv tags. Image-based streams
 (PGS / VobSub / DVB) are filtered out — the Go core refuses them too
 ("image-based ... out of scope"), they only ever show up as hints.
 
-Failure: cli exits non-zero → controller logs argv, exit code and all stderr;
-renderer surfaces the message verbatim under `#status`.
+When the language form picks a track automatically, titles are scored:
+full/dialogue/main/complete are preferred, signs/forced/SDH/CC are
+deprioritized. This matters in shows where the "English" stream list is
+`#3 English (Signs)` and `#4 English (Full Subtitle)`.
+
+Failure: cli exits non-zero or the file has no usable text tracks → the app
+rolls back to the full-window drop state and shows a friendly inline message
+("Couldn't read ... as a video"), with the raw error only in the log. No modal;
+drop another file to retry.
 
 ## 2. Merge
 
@@ -29,18 +37,45 @@ The transaction is merge-in-TEMP and save-on-confirm: nothing is ever written
 next to the video until the user confirms.
 
 The CLI's stderr carries machine lines the controller parses: throttled
-`{"role"...,"overall":0..1,"step","seconds","total_seconds"}` progress
-(merged extraction steps: primary first half, secondary second half; UI
-redraws at ~10fps), and one `{"event":"bin","path":...}` line proving the
-exact vendored binary used. The stdout payload is:
+`{"stage","role","message","overall":0..1,"step","seconds","total_seconds"}`
+progress, and one `{"event":"bin","path":...}` line proving the exact vendored
+binary used. `overall` is weighted across the whole pipeline, not just
+extraction:
+
+| stage | overall |
+|---|---|
+| probe | 0.00–0.02 |
+| primary extraction | 0.02–0.31 |
+| secondary extraction | 0.31–0.62 |
+| merge/write | 0.62 |
+| conflict analysis | 0.66 |
+| exact ink masks | 0.70 |
+| decision log | 0.94 |
+| review loading | 0.97 |
+| done | 1.00 |
+
+Stages without a reliable fraction (`indeterminate: true`) keep the bar at
+their stage floor with a shimmer, instead of pretending to be finished. The
+exact stage also reports the number of masks rendered. The stdout payload is:
 
 ```
 {"out":"...ass","styles":3,"lines":522,
+ "report_path":"...ass.report.json","conflicts":12,"conflict_windows":4,"review_required":1,
  "events":[{"start":62.62,"end":63.75,"lang":"primary","text":"Xong!"}, ...]}
 ```
 
 `events` is what the preview picker samples; `lang` distinguishes primary vs
 secondary rows in the UI if you ever want a per-track breakdown in the UI.
+
+`report_path` points at the job's decision log: one entry per event (including
+unchanged events), the conflict pairs and the review windows. See
+`docs/decision-log.md`. Unless `--no-exact` is passed, the CLI also renders
+libass ink masks for conflict-involved events and uses them to drop box-padding
+false positives and to cost placement candidates; this adds a few seconds and
+emits `{"stage":"exact","message":"rendering exact ink masks (N)…"}`
+progress lines. The log is written next to `--out` unless `--report`
+names another path; `subsandwicher report --ass <file>` rescans an existing
+merged file without rewriting it.
 
 ## 3. Preview
 
@@ -52,8 +87,9 @@ inside visible text, biased toward longer events (more reliable showcase).
 
 ## 4. Save
 
-`confirm-save { mergedPath, videoPath, primaryLang, secondaryLang }`.
-Copy (not move) temp file to:
+`confirm-save { mergedPath, reportPath, videoPath, primaryLang, secondaryLang,
+fixes, comments }`. If fixes were chosen, the CLI `apply` command writes a temp
+file with them applied; the result is then copied (not moved) to:
 
 ```
 <video dir>\<video base>.<primaryLang>-<secondaryLang>.ass
@@ -62,14 +98,50 @@ Copy (not move) temp file to:
 matching the original CLI naming convention. Language tags come from the two
 selected streams; empty tags degrade gracefully to `-merged.ass` with a warn
 log. The temp copy stays in %TEMP% — safer against mid-save crashes than a
-move, and it's the same data byte-for-byte.
+move.
+
+The full review session is written next to it as
+`<video base>.<primaryLang>-<secondaryLang>.review.json`: the decision report,
+the chosen suggestions, the concrete changes `apply` made, and the per-window
+comments. If that log cannot be written, the subtitles are still saved and the
+UI surfaces the log error.
 
 ## Review UX note
 
-Currently one "Another frame" jump button; there is no per-stream time context
-or seek slider. If users report wanting precise verification, the plan path is
-a small timeline in the browser (that's the same "events" array) — mpv stays
-a dumb pixel renderer under controller command.
+The merge returns a decision log with conflict windows (`docs/decision-log.md`),
+and the renderer shows a **Review conflicts** panel: windows filtered by
+surface and cause, events with boxes/decisions/raw lines, ranked fix
+candidates, a comment box, and **Copy state for report** (JSON for a selected
+window) / **Copy all state**. "Preview window" seeks mpv to the window's peak;
+choosing a fix seeks to that event's own conflict time and previews it.
+Every event active in the window gets its own group; same-style, same-lane signs
+carry a `related` list, cluster-wide moves are marked `sharedWith`, and the UI
+promotes the move chosen for a sibling (`same move as #N`). Placement samples
+the video frame in RGB and weighs edge density against the event's text colour,
+so readable overlap with a shape is allowed.
+Each window can be played on loop (muted by default, unmute and 0.25x-2x speed
+controls), with a progress bar showing the current position inside the loop.
+The pause button holds the current frame; choosing a fix while paused reloads
+subtitles in place, without seeking away from that frame. A chosen nudge/shrink
+candidate can be edited manually (dx, dy, font %, position); edits update the
+preview and are recorded with the fix in the review log. Tick event headings and
+use **Group move** to apply one shared dx/dy across a cluster, including
+non-conflicting signs. Every event heading also has **Move to top** to raise its
+layer above the other subtitles.
+
+You can also click/drag in the mpv preview: mousedown pauses and picks the
+topmost subtitle under the cursor, a translucent ghost shows the target, and
+release commits the move through the same override path. Shift locks the
+dominant axis, Alt moves at quarter speed, and arrow keys nudge the selected
+event (Shift+arrows move 10 px); `R` resets the selected event to its original. Drags snap to the frame, the 5% safe area, and (for single events) other visible subtitle boxes.
+Animated subtitles translate their whole `\move` path; hit-testing for them
+uses the paused event seek and its exact ink box, so pause at the event's seek
+before dragging.
+
+After applying, the app warns about fixes that
+leave the safe area/frame and shows an estimated re-check of conflicts still
+touching changed events. Applying a candidate for preview and save goes through the CLI
+`apply` command; mpv remains a dumb pixel renderer under controller command.
 
 ## Kiosk policy and input
 

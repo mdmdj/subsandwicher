@@ -145,7 +145,7 @@ func TestParseAndMerge(t *testing.T) {
 	}, "\n")))
 
 	out := filepath.Join(t.TempDir(), "out.ass")
-	nStyles, nLines, _, err := mergeAndWrite(prim, sec, "en", rescaleFactor(prim, sec), out)
+	nStyles, nLines, _, _, err := mergeAndWrite(prim, sec, "en", rescaleFactor(prim, sec), out, JobInfo{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

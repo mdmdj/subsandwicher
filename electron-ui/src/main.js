@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, Menu, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Menu, screen, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -12,12 +12,18 @@ let activeSession = null;
 let tempDir = null;
 let previewCtx = null; // { videoPath, mergedPath } for auto-relaunch after mpv death
 let activeMergeProcess = null; // cli process for the running merge
+let playbackTimer = null; // pauses a non-looping window at its end
+let playbackClock = null; // polls mpv time-pos while a conflict window plays
+let playbackRange = null; // { start, end } for the active window loop
+let playbackTickBusy = false;
+
+const dragScriptPath = path.join(__dirname, 'mpv-drag.lua');
 
 function ensureWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
   mainWindow = new BrowserWindow({
-    width: 960,
-    height: 640,
+    width: 1120,
+    height: 760,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -86,6 +92,200 @@ function extensionlessBase(videoPath) {
   return path.basename(videoPath, path.extname(videoPath));
 }
 
+// Raw Dialogue lines in the merged file, indexed by the same order the report
+// uses for event ids. Attached to the review payload so a copied state can be
+// replayed without shipping the whole file.
+function readDialogueLines(assPath) {
+  try {
+    const text = fs.readFileSync(assPath, 'utf8');
+    const out = [];
+    for (const line of text.split('\n')) {
+      if (line.startsWith('Dialogue:')) out.push(line.replace(/\r$/, ''));
+    }
+    return out;
+  } catch (e) {
+    log('warn', 'could not read merged .ass for raw lines', e.message);
+    return [];
+  }
+}
+
+function loadReview(stats) {
+  if (!stats || !stats.report_path) return null;
+  try {
+    const report = JSON.parse(fs.readFileSync(stats.report_path, 'utf8'));
+    const raw = readDialogueLines(stats.out);
+    for (const ev of report.events || []) {
+      if (Number.isInteger(ev.id) && raw[ev.id]) ev.raw = raw[ev.id];
+    }
+    log('info', 'review loaded', {
+      report: stats.report_path,
+      windows: (report.windows || []).length,
+      conflicts: (report.conflicts || []).length,
+    });
+    return report;
+  } catch (e) {
+    log('warn', 'review load failed', e.message);
+    return null;
+  }
+}
+
+function clearPlaybackTimer() {
+  if (playbackTimer) {
+    clearTimeout(playbackTimer);
+    playbackTimer = null;
+  }
+}
+
+function clearPlaybackClock() {
+  if (playbackClock) {
+    clearInterval(playbackClock);
+    playbackClock = null;
+  }
+  playbackRange = null;
+}
+
+// Report progress within the window loop to the renderer. Polling keeps the
+// mpv IPC surface small and works the same for looping and one-shot playback.
+function startPlaybackClock(start, end) {
+  clearPlaybackClock();
+  if (!(Number.isFinite(start) && Number.isFinite(end) && end > start)) return;
+  playbackRange = { start, end };
+  const tick = async () => {
+    if (playbackTickBusy) return;
+    if (!activeSession || activeSession.isDead() || !playbackRange) return;
+    playbackTickBusy = true;
+    try {
+      const t = await activeSession.getProperty('time-pos');
+      if (typeof t === 'number' && playbackRange && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('playback-position', {
+          time: t, start: playbackRange.start, end: playbackRange.end,
+        });
+      }
+    } catch (e) {
+      log('warn', 'playback position poll failed', e.message);
+    } finally {
+      playbackTickBusy = false;
+    }
+  };
+  playbackClock = setInterval(tick, 100);
+  tick();
+}
+
+// Pause and clear any window loop. Used before seeking or reloading subs.
+async function stopPlayback(seekTo) {
+  clearPlaybackTimer();
+  clearPlaybackClock();
+  if (!activeSession || activeSession.isDead()) return;
+  try {
+    await activeSession.exec(['set', 'pause', 'yes']);
+    await activeSession.exec(['set', 'ab-loop-a', 'no']);
+    await activeSession.exec(['set', 'ab-loop-b', 'no']);
+    if (typeof seekTo === 'number') await activeSession.seek(seekTo);
+  } catch (e) {
+    log('warn', 'stop playback failed', e.message);
+  }
+}
+
+// Ensure a live mpv session is at `time`, relaunching if the user closed it.
+// The reload-safe preview working copy is used when present.
+async function ensurePreviewAt(videoPath, mergedPath, time) {
+  const ctx = previewCtx || { videoPath, mergedPath };
+  if (activeSession && !activeSession.isDead()) {
+    await activeSession.seek(time);
+    return true;
+  }
+  log('warn', 'no live mpv session; relaunching for preview seek');
+  if (activeSession) activeSession.quit();
+  activeSession = await launchPreview({
+    video: ctx.videoPath, mergedSub: ctx.previewPath || ctx.mergedPath, seekTo: time,
+  });
+  return true;
+}
+
+function launchPreview(opts) {
+  return launchPreviewSession({ ...opts, scriptPath: dragScriptPath }).then((session) => {
+    session.onClientMessage = (args) => handleMpvDrag(args);
+    return session;
+  });
+}
+
+// Mouse drag/nudge messages from mpv-drag.lua. Down pauses the preview so the
+// frame and its hit-test boxes stay fixed; coordinates are normalized to the
+// video rectangle by the Lua script.
+function handleMpvDrag(args) {
+  if (!previewCtx || !mainWindow || mainWindow.isDestroyed()) return;
+  let list = args || [];
+  // JSON IPC may include the script-message name as the first payload arg.
+  if (list[0] === 'subsandwicher-drag') list = list.slice(1);
+  const [phase, x, y, mode, time, dx, dy] = list;
+  if (!['down', 'move', 'up', 'cancel', 'nudge', 'reset'].includes(phase)) return;
+  if (phase !== 'move') {
+    log('info', 'preview drag', { phase, x, y, mode, time, dx, dy });
+  }
+  if (phase === 'down') {
+    stopPlayback().catch((e) => log('warn', 'pause for drag failed', e.message));
+  }
+  const numOrNull = (v) => {
+    if (v === undefined || v === null || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  mainWindow.webContents.send('preview-drag', {
+    phase,
+    nx: numOrNull(x),
+    ny: numOrNull(y),
+    mode: mode || 'normal',
+    time: numOrNull(time),
+    dx: numOrNull(dx),
+    dy: numOrNull(dy),
+  });
+}
+
+function applyArgs(assPath, reportPath, outPath, fixes) {
+  const args = ['apply', `--ass=${assPath}`, `--report=${reportPath}`, `--out=${outPath}`];
+  for (const f of fixes || []) {
+    if (!f || !Number.isInteger(f.windowId)) continue;
+    // Manual overrides and comments need the full object form.
+    if (f.override || f.comment) {
+      args.push(`--fix-json=${JSON.stringify(f)}`);
+    } else if (Number.isInteger(f.suggestionIndex)) {
+      args.push(`--fix=${f.windowId}:${f.suggestionIndex}`);
+    }
+  }
+  return args;
+}
+
+// Write a working copy with the accepted plus previewed fixes and reload it in
+// mpv. The original merged file is never modified.
+async function applyPreviewFixes(fixes, seekTo, keepPlaying) {
+  const ctx = previewCtx;
+  if (!ctx || !ctx.previewPath) return { ok: false, error: 'preview session is not ready' };
+  if (!ctx.reportPath) return { ok: false, error: 'this merge has no decision log' };
+  if (!keepPlaying) await stopPlayback();
+  const res = await runCli(applyArgs(ctx.mergedPath, ctx.reportPath, ctx.previewPath, fixes || []), {});
+  let resumed = false;
+  if (activeSession && !activeSession.isDead()) {
+    await activeSession.reloadSubs();
+    if (keepPlaying) {
+      resumed = true;
+      // sub-reload should leave a playing session alone, but make sure.
+      try { await activeSession.exec(['set', 'pause', 'no']); } catch (e) { log('warn', 'resume playback', e.message); }
+    } else if (typeof seekTo === 'number') {
+      await activeSession.seek(seekTo);
+    }
+  } else {
+    activeSession = await launchPreview({
+      video: ctx.videoPath, mergedSub: ctx.previewPath, seekTo: typeof seekTo === 'number' ? seekTo : 0,
+    });
+  }
+  return {
+    ok: true,
+    applied: res.applied || [],
+    remainingConflicts: res.remainingConflicts || [],
+    keepPlaying: resumed,
+  };
+}
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null); // no menu bar; not relevant to our flow
   initLog(app.getPath('userData'));
@@ -128,20 +328,50 @@ app.whenReady().then(() => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('merge-progress', p);
       },
     });
-    log('info', 'merge ok', { out: stats.out, styles: stats.styles, lines: stats.lines, events: (stats.events || []).length });
+    log('info', 'merge ok', {
+      out: stats.out, styles: stats.styles, lines: stats.lines,
+      events: (stats.events || []).length, report: stats.report_path,
+      conflicts: stats.conflicts, windows: stats.conflict_windows,
+      reviewRequired: stats.review_required, exact: stats.exact,
+      exactEvents: stats.exact_events,
+    });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('merge-progress', {
+        stage: 'review', overall: 0.97, indeterminate: true,
+        message: 'loading the decision log for review…',
+      });
+    }
+    stats.review = loadReview(stats);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('merge-progress', {
+        stage: 'done', overall: 1, message: 'review ready',
+      });
+    }
     return stats;
   });
 
-  ipcMain.handle('launch-preview', async (_e, { videoPath, mergedPath, seekTo }) => {
+  ipcMain.handle('launch-preview', async (_e, { videoPath, mergedPath, reportPath, seekTo }) => {
     log('info', 'launch preview', { videoPath, mergedPath, seekTo });
+    clearPlaybackTimer();
     if (activeSession) {
       log('info', 'existing session found; shutting it down first');
       activeSession.quit();
       activeSession = null;
     }
-    previewCtx = { videoPath, mergedPath };
-    activeSession = await launchPreviewSession({ video: videoPath, mergedSub: mergedPath, seekTo });
-    log('info', 'preview session ready (seekTo=' + seekTo + ')');
+    let previewPath = mergedPath;
+    try {
+      previewPath = tempFile('preview.ass');
+      fs.copyFileSync(mergedPath, previewPath);
+    } catch (e) {
+      log('warn', 'could not create preview working copy; using the merged file', e.message);
+      previewPath = mergedPath;
+    }
+    const rep = reportPath || (fs.existsSync(mergedPath + '.report.json') ? mergedPath + '.report.json' : null);
+    previewCtx = { videoPath, mergedPath, previewPath, reportPath: rep };
+    activeSession = await launchPreview({ video: videoPath, mergedSub: previewPath, seekTo });
+    log('info', 'preview session ready (seekTo=' + seekTo + ')', { previewPath, reportPath: rep });
+    // The review UI is the next step; keep it in front of the new mpv window.
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.focus();
     return true;
   });
 
@@ -153,30 +383,174 @@ app.whenReady().then(() => {
   ipcMain.handle('jump-random-frame', async (_e, { videoPath, mergedPath, events }) => {
     log('info', 'pick random candidate among', events.length, 'events');
     const t = pickPreviewTime(events);
-    // If mpv was closed by hand, relaunch it at the requested time.
-    if (!activeSession || activeSession.isDead()) {
-      log('warn', 'no live mpv session; relaunching for this command');
-      const ctx = previewCtx || { videoPath, mergedPath };
-      try {
-        if (activeSession) activeSession.quit();
-        activeSession = await launchPreviewSession({ video: ctx.videoPath, mergedSub: ctx.mergedPath, seekTo: t });
-      } catch (e) {
-        log('error', 'relaunch failed', e.message);
-        return { ok: false, error: 'mpv relaunch failed: ' + e.message };
-      }
-    } else {
-      await activeSession.seek(t);
+    // If mpv was closed by hand, ensurePreviewAt relaunches it at the time.
+    try {
+      await ensurePreviewAt(previewCtx?.videoPath || videoPath, previewCtx?.mergedPath || mergedPath, t);
+    } catch (e) {
+      log('error', 'relaunch failed', e.message);
+      return { ok: false, error: 'mpv relaunch failed: ' + e.message };
     }
     log('info', 'jumped to', t);
     return { ok: true, time: t };
   });
 
-  ipcMain.handle('confirm-save', async (_e, { mergedPath, videoPath, primaryLang, secondaryLang }) => {
-    log('info', 'confirm save', { mergedPath, videoPath, primaryLang, secondaryLang });
-    return saveMerged(mergedPath, videoPath, primaryLang, secondaryLang);
+  ipcMain.handle('seek-preview', async (_e, { videoPath, mergedPath, time }) => {
+    log('info', 'seek preview to', time);
+    try {
+      await stopPlayback();
+      await ensurePreviewAt(videoPath, mergedPath, time);
+      return { ok: true, time };
+    } catch (e) {
+      log('error', 'seek preview failed', e.message);
+      return { ok: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('apply-preview', async (_e, { fixes, seekTo, keepPlaying }) => {
+    log('info', 'apply preview fixes', { fixes, seekTo, keepPlaying });
+    try {
+      return await applyPreviewFixes(fixes, seekTo, keepPlaying);
+    } catch (e) {
+      log('error', 'apply preview failed', e.message);
+      return { ok: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('preview-drag-boxes', async (_e, { playW, playH, boxes }) => {
+    if (!activeSession || activeSession.isDead()) return false;
+    const args = ['script-message', 'subsandwicher-set-box', String(playW), String(playH)];
+    for (const b of boxes || []) {
+      args.push(String(b.x0), String(b.y0), String(b.x1), String(b.y1));
+    }
+    try {
+      await activeSession.exec(args);
+      return true;
+    } catch (e) {
+      log('warn', 'preview drag overlay failed', e.message);
+      return false;
+    }
+  });
+
+  ipcMain.handle('preview-drag-cancel', async () => {
+    if (!activeSession || activeSession.isDead()) return false;
+    try {
+      await activeSession.exec(['script-message', 'subsandwicher-cancel']);
+      return true;
+    } catch (e) {
+      log('warn', 'preview drag cancel failed', e.message);
+      return false;
+    }
+  });
+
+  ipcMain.handle('preview-playback', async (_e, payload) => {
+    const { action } = payload || {};
+    log('info', 'preview playback', payload);
+    try {
+      if (action === 'stop') {
+        await stopPlayback(typeof payload.start === 'number' ? payload.start : undefined);
+        return { ok: true };
+      }
+      if (action === 'pause') {
+        // Hold the current frame; no seek, so fix previews can reload subtitles
+        // against the exact image the user is looking at.
+        await stopPlayback();
+        return { ok: true };
+      }
+      if (!activeSession || activeSession.isDead()) {
+        const ctx = previewCtx;
+        if (!ctx) return { ok: false, error: 'preview session is not ready' };
+        activeSession = await launchPreview({
+          video: ctx.videoPath,
+          mergedSub: ctx.previewPath || ctx.mergedPath,
+          seekTo: typeof payload.start === 'number' ? payload.start : 0,
+        });
+      }
+      const session = activeSession;
+      const speed = Number(payload.speed) > 0 ? Number(payload.speed) : 1;
+      const muted = payload.muted !== false;
+      await session.exec(['set', 'mute', muted ? 'yes' : 'no']);
+      await session.exec(['set', 'speed', String(speed)]);
+      if (action === 'resume') {
+        if (!activeSession || activeSession.isDead()) return { ok: false, error: 'preview session is not ready' };
+        if (payload.loop) {
+          await activeSession.exec(['set', 'ab-loop-a', String(payload.start)]);
+          await activeSession.exec(['set', 'ab-loop-b', String(payload.end)]);
+        }
+        await activeSession.exec(['set', 'pause', 'no']);
+        startPlaybackClock(payload.start, payload.end);
+        return { ok: true };
+      }
+      if (action === 'play' || action === 'update') {
+        if (payload.loop) {
+          await session.exec(['set', 'ab-loop-a', String(payload.start)]);
+          await session.exec(['set', 'ab-loop-b', String(payload.end)]);
+        } else {
+          await session.exec(['set', 'ab-loop-a', 'no']);
+          await session.exec(['set', 'ab-loop-b', 'no']);
+        }
+      }
+      if (action === 'play') {
+        clearPlaybackTimer();
+        await session.seek(payload.start);
+        await session.exec(['set', 'pause', 'no']);
+        startPlaybackClock(payload.start, payload.end);
+        if (!payload.loop) {
+          const seconds = Math.max(0.2, (payload.end - payload.start) / speed);
+          playbackTimer = setTimeout(async () => {
+            playbackTimer = null;
+            try { await session.exec(['set', 'pause', 'yes']); } catch {}
+            clearPlaybackClock();
+            if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('playback-ended');
+          }, seconds * 1000 + 120);
+        }
+      } else if (action === 'update') {
+        startPlaybackClock(payload.start, payload.end);
+      }
+      return { ok: true };
+    } catch (e) {
+      log('error', 'preview playback failed', e.message);
+      return { ok: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('confirm-save', async (_e, payload) => {
+    log('info', 'confirm save', {
+      mergedPath: payload && payload.mergedPath,
+      videoPath: payload && payload.videoPath,
+      primaryLang: payload && payload.primaryLang,
+      secondaryLang: payload && payload.secondaryLang,
+      fixes: (payload && payload.fixes || []).length,
+    });
+    return saveMerged(payload || {});
   });
 
   ipcMain.handle('open-logs-folder', () => shell.showItemInFolder(logPath()));
+
+  ipcMain.handle('copy-text', (_e, text) => {
+    clipboard.writeText(String(text ?? ''));
+    return true;
+  });
+
+  ipcMain.handle('eject', async () => {
+    clearPlaybackTimer();
+    clearPlaybackClock();
+    if (activeSession) {
+      activeSession.quit();
+      activeSession = null;
+    }
+    previewCtx = null;
+    log('info', 'ejected preview');
+    return true;
+  });
+
+  ipcMain.handle('get-app-meta', () => ({
+    version: app.getVersion(),
+    electron: process.versions.electron,
+    node: process.versions.node,
+    platform: process.platform,
+    arch: process.arch,
+    logPath: logPath(),
+  }));
 
   app.on('activate', () => ensureWindow());
 });
@@ -202,32 +576,94 @@ function pickPreviewTime(events) {
   return Math.max(0.05, e.start + Math.min(0.3, dur / 2));
 }
 
-function saveMerged(mergedPath, videoPath, primaryLang, secondaryLang) {
-  return new Promise(async (resolve) => {
-    if (!mergedPath || !fs.existsSync(mergedPath)) {
-      log('error', 'no merged file to save', mergedPath);
-      resolve({ ok: false, error: 'no merged preview file present' });
-      return;
+async function saveMerged(payload) {
+  const { mergedPath, videoPath, primaryLang, secondaryLang, reportPath, fixes, comments, statuses } = payload;
+  if (!mergedPath || !fs.existsSync(mergedPath)) {
+    log('error', 'no merged file to save', mergedPath);
+    return { ok: false, error: 'no merged preview file present' };
+  }
+  if (!primaryLang || !secondaryLang) {
+    log('warn', 'missing lang tags at save time', { primaryLang, secondaryLang });
+  }
+  const chosen = Array.isArray(fixes) ? fixes.filter(f => f && Number.isInteger(f.windowId) && Number.isInteger(f.suggestionIndex)) : [];
+  if (chosen.length && !reportPath) {
+    return { ok: false, error: 'review fixes were selected but the decision log is missing' };
+  }
+
+  let finalPath = mergedPath;
+  let applied = [];
+  try {
+    if (chosen.length) {
+      finalPath = tempFile('final.ass');
+      const res = await runCli(applyArgs(mergedPath, reportPath, finalPath, chosen), {});
+      applied = res.applied || [];
+      log('info', 'applied review fixes', { requested: chosen.length, applied: applied.length });
     }
-    if (!primaryLang || !secondaryLang) {
-      // fall back to a generic suffix if the UI failed to supply tags
-      log('warn', 'missing lang tags at save time', { primaryLang, secondaryLang });
-    }
-    let dest;
+  } catch (e) {
+    log('error', 'apply review fixes failed', e.message);
+    return { ok: false, error: 'applying review fixes failed: ' + e.message };
+  }
+
+  let dest;
+  let logPath = null;
+  let logError = null;
+  try {
+    const [{ totalKB }] = await safeStat(finalPath);
+    log('info', 'output file size kb', totalKB);
+    dest = destMergedPath(videoPath, primaryLang, secondaryLang);
+    log('info', 'dest', dest);
+    fs.copyFileSync(finalPath, dest);
+    log('info', 'saved merged subs', dest);
+  } catch (e) {
+    log('error', 'save failed', e.message);
+    return { ok: false, error: e.message };
+  }
+
+  if (reportPath && fs.existsSync(reportPath)) {
     try {
-      const [{ totalKB }] = await safeStat(mergedPath);
-      log('info', 'merged file size kb', totalKB);
-      dest = destMergedPath(videoPath, primaryLang, secondaryLang);
-      log('info', 'dest', dest);
-      fs.copyFileSync(mergedPath, dest);
-      log('info', 'saved merged subs', dest);
-      resolve({ ok: true, dest });
+      const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+      const raw = readDialogueLines(mergedPath);
+      for (const ev of report.events || []) {
+        if (Number.isInteger(ev.id) && raw[ev.id]) ev.raw = raw[ev.id];
+      }
+      const windows = new Map((report.windows || []).map(w => [w.id, w]));
+      const fixDetails = chosen.map(f => {
+        const w = windows.get(f.windowId);
+        const suggestion = w && w.suggestions ? w.suggestions[f.suggestionIndex] : null;
+        return { ...f, suggestion: suggestion || null };
+      });
+      logPath = dest.replace(/\.ass$/i, '') + '.review.json';
+      const session = {
+        kind: 'subsandwicher.review-session',
+        version: 1,
+        createdAt: new Date().toISOString(),
+        app: {
+          version: app.getVersion(),
+          electron: process.versions.electron,
+          node: process.versions.node,
+          platform: process.platform,
+          arch: process.arch,
+        },
+        video: videoPath,
+        mergedAss: mergedPath,
+        finalAss: dest,
+        reportPath,
+        fixes: fixDetails,
+        applied,
+        comments: comments || {},
+        statuses: statuses || {},
+        report,
+      };
+      fs.writeFileSync(logPath, JSON.stringify(session, null, 2) + '\n');
+      log('info', 'review session log saved', logPath);
     } catch (e) {
-      log('error', 'save failed', e.message);
-      resolve({ ok: false, error: e.message });
+      logError = e.message;
+      log('error', 'review session log failed', e.message);
     }
-    log('info', 'save complete');
-  });
+  }
+
+  log('info', 'save complete', { dest, log: logPath, applied: applied.length });
+  return { ok: true, dest, log: logPath, logError, applied: applied.length };
 }
 
 async function safeStat(p) {
@@ -246,6 +682,7 @@ app.on('quit', () => {
     previewSession: activeSession ? 'live' : 'none',
     merge: activeMergeProcess ? 'in flight' : 'idle'
   });
+  clearPlaybackTimer();
   if (activeSession) {
     activeSession.quit();
   }

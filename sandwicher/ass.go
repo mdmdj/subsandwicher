@@ -420,58 +420,301 @@ type LineEvent struct {
 	Text  string  `json:"text,omitempty"`
 }
 
-// mergeAndWrite applies all transformations and writes the merged .ass file.
-func mergeAndWrite(prim, sec *ASSDoc, lang2 string, scale float64, outPath string) (nStyles, nLines int, events []LineEvent, err error) {
-	// Primary: top-aligned -> bottom-aligned (horizontal kept), middle -> middle-left.
-	for _, s := range prim.Styles {
-		transformStyleAlignment(s, false)
+// mergeAndWrite applies role-safe transformations, orders the events, writes
+// the merged .ass and returns the per-event decision log for the job.
+func mergeAndWrite(prim, sec *ASSDoc, lang2 string, scale float64, outPath string, job JobInfo, exact bool, progress ...func(Progress)) (nStyles, nLines int, events []LineEvent, rep *Report, err error) {
+	var reportProgress func(Progress)
+	if len(progress) > 0 {
+		reportProgress = progress[0]
 	}
-	for _, d := range prim.Dialogues {
-		d.Text = remapTextAlignments(d.Text, false)
+	playW, playH := playRes(prim)
+
+	primStyles := map[string]*ASSStyle{}
+	for _, s := range prim.Styles {
+		primStyles[s.name()] = s
+	}
+	secStyles := map[string]*ASSStyle{}
+	for _, s := range sec.Styles {
+		secStyles[s.name()] = s
 	}
 
-	// Secondary: force top alignment (middle -> middle-right), rescale to
-	// primary PlayRes, suffix style names and update all references.
+	type preEvent struct {
+		d          *Dialogue
+		track      Track
+		role       Role
+		oldStyle   string
+		finalStyle string
+		origAlign  int
+	}
+
+	// Pass 1: classify before any transform, and remember which styles carry
+	// dialogue. A style is re-anchored only if dialogue uses it.
+	var pres []*preEvent
+	styleHasDialogue := map[string]bool{}
+	for _, d := range prim.Dialogues {
+		st := primStyles[d.Style]
+		orig := styleInt(st, "alignment")
+		if n, ok := inlineAlign(d.Text); ok {
+			orig = n
+		}
+		role := classifyRole(d, d.Style)
+		pres = append(pres, &preEvent{d: d, track: TrackPrimary, role: role, oldStyle: d.Style, finalStyle: d.Style, origAlign: orig})
+		if role == RoleDialogue {
+			styleHasDialogue[d.Style] = true
+		}
+	}
+	for _, d := range sec.Dialogues {
+		st := secStyles[d.Style]
+		orig := styleInt(st, "alignment")
+		if n, ok := inlineAlign(d.Text); ok {
+			orig = n
+		}
+		role := classifyRole(d, d.Style)
+		pres = append(pres, &preEvent{d: d, track: TrackSecondary, role: role, oldStyle: d.Style, finalStyle: d.Style, origAlign: orig})
+		if role == RoleDialogue {
+			styleHasDialogue[d.Style] = true
+		}
+	}
+
 	renames := buildSecondaryRenames(prim, sec, "-"+lang2)
+	for old, nn := range renames {
+		if styleHasDialogue[old] {
+			styleHasDialogue[nn] = true
+		}
+	}
+
+	// Pass 2: transform styles. Dialogue styles move; sign-only styles keep
+	// their anchor. Secondary geometry is rescaled either way.
+	for _, s := range prim.Styles {
+		if styleHasDialogue[s.name()] {
+			transformStyleAlignment(s, false)
+		}
+	}
 	for _, s := range sec.Styles {
-		transformStyleAlignment(s, true)
+		if styleHasDialogue[s.name()] {
+			transformStyleAlignment(s, true)
+		}
 		if scale != 1 {
 			scaleStyle(s, scale)
 		}
 	}
-	for _, d := range sec.Dialogues {
-		if nn, ok := renames[d.Style]; ok {
-			d.Style = nn
+
+	styles := map[string]*ASSStyle{}
+	for _, s := range prim.Styles {
+		styles[s.name()] = s
+	}
+	for _, s := range sec.Styles {
+		styles[s.name()] = s
+	}
+
+	// Pass 3: write event text with role-safe rules.
+	plan := make([]*plannedEvent, 0, len(pres))
+	for _, p := range pres {
+		d := p.d
+		isSec := p.track == TrackSecondary
+		if isSec {
+			if nn, ok := renames[p.oldStyle]; ok {
+				d.Style = nn
+				p.finalStyle = nn
+			}
 		}
-		d.Text = renameResetStyles(d.Text, renames)
-		d.Text = remapTextAlignments(d.Text, true)
-		if scale != 1 {
-			scaleDialogueMargins(d, scale)
+		pe := &plannedEvent{
+			d: d, track: p.track, role: p.role, styleName: p.finalStyle,
+			origAlign: p.origAlign,
+		}
+
+		if p.role == RoleDialogue {
+			before := p.origAlign
+			after := mapAlignment(before, isSec)
+			if before >= 1 && before <= 9 && before != after {
+				pe.add(Decision{
+					Rule: "align.dialogue-remapped", Kind: KindAlignment,
+					Level: LevelInfo, Action: "remapped",
+					Before: strconv.Itoa(before), After: strconv.Itoa(after),
+					Reason: "dialogue is re-anchored into its track's lane", Confidence: 0.95,
+					Surface: SurfaceAuto,
+				})
+			}
+			d.Text = remapTextAlignments(d.Text, isSec)
+		} else {
+			// Positioned and drawing events keep their author's anchor. If the
+			// style itself was re-anchored for dialogue, pin the original.
+			if styleHasDialogue[p.finalStyle] && !hasInlineAlign(d.Text) && p.origAlign >= 1 && p.origAlign <= 9 {
+				d.Text = fmt.Sprintf(`{\an%d}`, p.origAlign) + d.Text
+				pe.add(Decision{
+					Rule: "align.sign-style-preserved", Kind: KindAlignment,
+					Level: LevelNotice, Action: "pinned",
+					Before: strconv.Itoa(p.origAlign), After: strconv.Itoa(p.origAlign),
+					Reason:     "style is shared with dialogue; the sign keeps its original anchor",
+					Confidence: 0.9, Surface: SurfaceAuto,
+				})
+			} else {
+				pe.add(Decision{
+					Rule: "align.positioned-preserved", Kind: KindAlignment,
+					Level: LevelInfo, Action: "kept",
+					Reason:     "signs and drawings are exempt from alignment remapping",
+					Confidence: 0.95, Surface: SurfaceNone,
+				})
+			}
+		}
+
+		if isSec {
+			d.Text = renameResetStyles(d.Text, renames)
+			if scale != 1 {
+				var tags []string
+				d.Text, tags = scaleInlineGeometry(d.Text, scale)
+				if len(tags) > 0 {
+					pe.add(Decision{
+						Rule: "scale.inline-geometry", Kind: KindScale,
+						Level: LevelNotice, Action: "scaled",
+						After:      strings.Join(tags, ","),
+						Reason:     fmt.Sprintf("inline geometry scaled by %.4f to the primary PlayRes", scale),
+						Confidence: 0.9, Surface: SurfaceAuto,
+					})
+				}
+				pe.add(Decision{
+					Rule: "scale.track", Kind: KindScale,
+					Level: LevelInfo, Action: "scaled",
+					Reason:     fmt.Sprintf("secondary geometry normalized by %.4f", scale),
+					Confidence: 0.9, Surface: SurfaceAuto,
+				})
+				scaleDialogueMargins(d, scale)
+			}
+		}
+
+		pe.add(Decision{
+			Rule: "role.classified", Kind: KindRole, Level: LevelInfo, Action: "kept",
+			Reason: fmt.Sprintf("classified as %s on the %s track from position/style, not labels",
+				p.role.String(), p.track.String()),
+			Confidence: 0.85, Surface: SurfaceNone,
+		})
+		plan = append(plan, pe)
+	}
+
+	// Old order (stable by start, primary first) is the baseline for logging.
+	old := make([]*plannedEvent, len(plan))
+	copy(old, plan)
+	sort.SliceStable(old, func(i, j int) bool { return old[i].d.startCS < old[j].d.startCS })
+	for i, p := range old {
+		p.origOrder = i
+	}
+
+	// New order: explicit and deterministic. Signs draw below dialogue at the
+	// same start, which reproduces the E04 hand fix.
+	sort.SliceStable(plan, func(i, j int) bool {
+		a, b := plan[i], plan[j]
+		if a.d.startCS != b.d.startCS {
+			return a.d.startCS < b.d.startCS
+		}
+		al, bl := atoiDefault(a.d.Layer, 0), atoiDefault(b.d.Layer, 0)
+		if al != bl {
+			return al < bl
+		}
+		if roleRank(a.role) != roleRank(b.role) {
+			return roleRank(a.role) < roleRank(b.role)
+		}
+		ae, be := parseTimeCS(a.d.End), parseTimeCS(b.d.End)
+		if ae != be {
+			return ae < be
+		}
+		if a.track != b.track {
+			return a.track < b.track
+		}
+		return a.origOrder < b.origOrder
+	})
+	for i, p := range plan {
+		p.order = i
+		if p.order != p.origOrder {
+			p.add(Decision{
+				Rule: "order.role-priority", Kind: KindOrder,
+				Level: LevelNotice, Action: "moved",
+				Before: strconv.Itoa(p.origOrder), After: strconv.Itoa(p.order),
+				Reason:     "deterministic tie-break: signs before dialogue at the same start",
+				Confidence: 0.8, Surface: SurfaceAuto,
+			})
 		}
 	}
 
-	lines := make([]*Dialogue, 0, len(prim.Dialogues)+len(sec.Dialogues))
-	lines = append(lines, prim.Dialogues...)
-	lines = append(lines, sec.Dialogues...)
-	sort.SliceStable(lines, func(i, j int) bool { return lines[i].startCS < lines[j].startCS })
-
-	takes := map[string]bool{} // style names moved to the secondary track
-	for _, nn := range renames {
-		takes[nn] = true
+	// Base font per track, for the importance score.
+	baseFont := map[Track]float64{}
+	countsBy := map[Track]map[int]int{TrackPrimary: {}, TrackSecondary: {}}
+	for _, p := range plan {
+		if p.role != RoleDialogue {
+			continue
+		}
+		fs := int(styleFloat(styles[p.styleName], "fontsize", 20))
+		countsBy[p.track][fs]++
 	}
-	for _, d := range lines {
+	for tr, counts := range countsBy {
+		best, n := 0, 0
+		for fs, c := range counts {
+			if c > n || (c == n && fs > best) {
+				best, n = fs, c
+			}
+		}
+		if best > 0 {
+			baseFont[tr] = float64(best)
+		}
+	}
+	measurePlan(plan, styles, playW, playH, baseFont)
+
+	// Line events for the GUI preview picker.
+	for _, p := range plan {
 		lang := "primary"
-		if takes[d.Style] {
+		if p.track == TrackSecondary {
 			lang = "secondary"
 		}
 		events = append(events, LineEvent{
-			Start: float64(d.startCS) / 100,
-			End:   float64(parseTimeCS(d.End)) / 100,
+			Start: float64(p.d.startCS) / 100,
+			End:   float64(parseTimeCS(p.d.End)) / 100,
 			Lang:  lang,
-			Text:  assTextPreview(d.Text),
+			Text:  assTextPreview(p.d.Text),
 		})
 	}
 
+	job.PlayResX, job.PlayResY = playW, playH
+	job.Scale = scale
+	job.Styles = len(prim.Styles) + len(sec.Styles)
+	job.Lines = len(plan)
+
+	if err := writeMergedASS(prim, sec, plan, outPath); err != nil {
+		return 0, 0, nil, nil, err
+	}
+	emitProgress(reportProgress, Progress{Stage: "analyze", Overall: stageAnalyzeStart, Indeterminate: true,
+		Message: "detecting conflicts and scoring placements…"})
+	var ex *exactContext
+	if exact {
+		ex = newExactContext(outPath, playW, playH)
+		ex.setProgress(func(n int) {
+			emitProgress(reportProgress, Progress{Stage: "exact", Overall: stageExactStart, Indeterminate: true,
+				Message: fmt.Sprintf("rendering exact ink masks (%d)…", n)})
+		})
+		defer ex.close()
+	}
+	rep = buildReport(plan, job, playW, playH, ex)
+	if ex != nil {
+		ok, n, note := ex.exactSummary()
+		rep.Job.Exact, rep.Job.ExactEvents, rep.Job.ExactNote = ok, n, note
+	}
+	return len(prim.Styles) + len(sec.Styles), len(plan), events, rep, nil
+}
+
+func roleRank(r Role) int {
+	if r == RoleDialogue {
+		return 1
+	}
+	return 0
+}
+
+func atoiDefault(s string, def int) int {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func writeMergedASS(prim, sec *ASSDoc, plan []*plannedEvent, outPath string) error {
 	var b strings.Builder
 	b.WriteString("[Script Info]\n")
 	for _, l := range prim.InfoRaw {
@@ -493,7 +736,8 @@ func mergeAndWrite(prim, sec *ASSDoc, lang2 string, scale float64, outPath strin
 
 	b.WriteString("\n[Events]\n")
 	b.WriteString("Format: " + strings.Join(canonicalEventFields, ", ") + "\n")
-	for _, d := range lines {
+	for _, p := range plan {
+		d := p.d
 		fmt.Fprintf(&b, "Dialogue: %s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
 			d.Layer, d.Start, d.End, d.Style, d.Name, d.MarginL, d.MarginR, d.MarginV, d.Effect, d.Text)
 	}
@@ -501,10 +745,7 @@ func mergeAndWrite(prim, sec *ASSDoc, lang2 string, scale float64, outPath strin
 		b.WriteString("\n" + strings.Join(other, "\n") + "\n")
 	}
 
-	if err := os.WriteFile(outPath, []byte(b.String()), 0o644); err != nil {
-		return 0, 0, nil, err
-	}
-	return len(prim.Styles) + len(sec.Styles), len(lines), events, nil
+	return os.WriteFile(outPath, []byte(b.String()), 0o644)
 }
 
 var (
@@ -532,4 +773,98 @@ func writeStyleLine(b *strings.Builder, s *ASSStyle) {
 	b.WriteString("Style: ")
 	b.WriteString(strings.Join(vals, ","))
 	b.WriteByte('\n')
+}
+
+// scaleInlineGeometry multiplies every inline geometric override value by f.
+// ASS coordinates and sizes live in script space; when a track is normalized
+// from another PlayRes, all of them must move together. Timing, percentages
+// and colours are left alone.
+func scaleInlineGeometry(text string, f float64) (string, []string) {
+	var scaled []string
+	seen := map[string]bool{}
+	mark := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			scaled = append(scaled, name)
+		}
+	}
+	scaleNum := func(s string) string {
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return s
+		}
+		return formatNum(v * f)
+	}
+
+	var b strings.Builder
+	last := 0
+	inDrawing := false
+	for _, loc := range reOverrideBlock.FindAllStringIndex(text, -1) {
+		payload := text[last:loc[0]]
+		if inDrawing {
+			if np := reDrawingNum.ReplaceAllStringFunc(payload, scaleNum); np != payload {
+				payload = np
+				mark("drawing")
+			}
+		}
+		b.WriteString(payload)
+
+		block := text[loc[0]:loc[1]]
+		block = rePosTag.ReplaceAllStringFunc(block, func(m string) string {
+			s := rePosTag.FindStringSubmatch(m)
+			mark("pos")
+			return `\pos(` + scaleNum(s[1]) + `,` + scaleNum(s[2]) + `)`
+		})
+		block = reOrgTag.ReplaceAllStringFunc(block, func(m string) string {
+			s := reOrgTag.FindStringSubmatch(m)
+			mark("org")
+			return `\org(` + scaleNum(s[1]) + `,` + scaleNum(s[2]) + `)`
+		})
+		block = reMoveTag.ReplaceAllStringFunc(block, func(m string) string {
+			s := reMoveTag.FindStringSubmatch(m)
+			mark("move")
+			if s[5] != "" && s[6] != "" {
+				return `\move(` + scaleNum(s[1]) + `,` + scaleNum(s[2]) + `,` +
+					scaleNum(s[3]) + `,` + scaleNum(s[4]) + `,` + s[5] + `,` + s[6] + `)`
+			}
+			return `\move(` + scaleNum(s[1]) + `,` + scaleNum(s[2]) + `,` +
+				scaleNum(s[3]) + `,` + scaleNum(s[4]) + `)`
+		})
+		block = reScaleSizeTag.ReplaceAllStringFunc(block, func(m string) string {
+			s := reScaleSizeTag.FindStringSubmatch(m)
+			mark(s[1])
+			return `\` + s[1] + scaleNum(s[2])
+		})
+		block = reScaleFsTag.ReplaceAllStringFunc(block, func(m string) string {
+			s := reScaleFsTag.FindStringSubmatch(m)
+			mark("fs")
+			return `\fs` + scaleNum(s[1])
+		})
+		if m := reDrawingTag.FindStringSubmatch(block); m != nil {
+			if n, err := strconv.Atoi(m[1]); err == nil {
+				inDrawing = n > 0
+			}
+		}
+		b.WriteString(block)
+		last = loc[1]
+	}
+	tail := text[last:]
+	if inDrawing {
+		if np := reDrawingNum.ReplaceAllStringFunc(tail, scaleNum); np != tail {
+			tail = np
+			mark("drawing")
+		}
+	}
+	b.WriteString(tail)
+	return b.String(), scaled
+}
+
+func formatNum(v float64) string {
+	s := strconv.FormatFloat(v, 'f', 3, 64)
+	s = strings.TrimRight(s, "0")
+	s = strings.TrimRight(s, ".")
+	if s == "" || s == "-" {
+		return "0"
+	}
+	return s
 }

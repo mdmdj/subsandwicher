@@ -7,10 +7,11 @@ const { binaries } = require('./bins');
 // Small client for mpv's JSON IPC protocol (input IPC server), with the
 // request/response and event plumbing we need to steer preview playback.
 class MpvSession {
-  constructor({ video, mergedSub, seekTo }) {
+  constructor({ video, mergedSub, seekTo, scriptPath }) {
     this.video = video;
     this.mergedSub = mergedSub;
     this.seekTo = seekTo;
+    this.scriptPath = scriptPath;
     this.proc = null;
     this.client = null;
     this.pipePath = getPipePath();
@@ -22,16 +23,19 @@ class MpvSession {
     this.pendingCommandsOnReady = [];
     this.onLog = (msg) => log('info', 'mpv:', msg);
     this.onExit = null;
+    this.onClientMessage = null;
   }
 
   spawn(minimal = false) {
     if (this.proc) throw new Error('already spawned');
     const { mpv } = binaries();
+    const scriptArgs = this.scriptPath ? [`--script=${this.scriptPath}`] : [];
     let args;
     if (minimal) {
-      args = [...argsForLaunch(this.pipePath), '--pause', '--keep-open=always', this.video];
+      args = [...scriptArgs, ...argsForLaunch(this.pipePath), '--pause', '--keep-open=always', this.video];
     } else {
       args = [
+        ...scriptArgs,
         ...argsForLaunch(this.pipePath),
         '--vo=gpu-next',
         '--hwdec=auto-safe',
@@ -44,6 +48,10 @@ class MpvSession {
         '--osc=no',
         '--input-default-bindings=no',
         '--window-dragging=no',
+        '--mute=yes',
+        // Keep the preview visible beside the review window; the user can
+        // still move it with the title bar.
+        '--ontop=yes',
         this.video,
       ];
     }
@@ -109,6 +117,12 @@ class MpvSession {
         this.pending.delete(msg.request_id);
         if (msg.error === 'success' || msg.request_id) resolve(msg);
         else reject(new Error(`mpv error: ${msg.error}`));
+      } else if (msg.event === 'client-message') {
+        // Drag/nudge messages can arrive at mouse-move frequency; keep them out
+        // of the log. The renderer owns all interpretation.
+        if (this.onClientMessage) {
+          try { this.onClientMessage(msg.args || []); } catch (e) { log('warn', 'client-message handler failed', e.message); }
+        }
       } else if (msg.event) {
         this.onLog(`event ${msg.event}`);
       }
@@ -132,8 +146,13 @@ class MpvSession {
     });
   }
 
+  async getProperty(name) {
+    const msg = await this.exec(['get_property', name]);
+    return msg && typeof msg.data !== 'undefined' ? msg.data : null;
+  }
   seek(t) { return this.exec(['seek', t, 'absolute+exact']); }
   stepFrame(dir = 1) { return this.exec(['frame-step', dir]); }
+  reloadSubs() { return this.exec(['sub-reload']); }
   anotherRandomFrame(t) { return this.seek(t); }
   isDead() { return this.dead || !this.proc || this.proc.killed; }
 
