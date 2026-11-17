@@ -287,6 +287,21 @@ func ProbeDuration(video string) float64 {
 	return d
 }
 
+// ProbeVideoSize returns the first video stream's dimensions.
+func ProbeVideoSize(video string) (int, int, error) {
+	out, err := exec.Command(resolveBin("ffprobe"), "-v", "error",
+		"-select_streams", "v:0", "-show_entries", "stream=width,height",
+		"-of", "csv=p=0:s=x", video).Output()
+	if err != nil {
+		return 0, 0, fmt.Errorf("ffprobe video size failed: %w", err)
+	}
+	var w, h int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%dx%d", &w, &h); err != nil {
+		return 0, 0, fmt.Errorf("parsing video size %q: %w", strings.TrimSpace(string(out)), err)
+	}
+	return w, h, nil
+}
+
 // extractSubtitle extracts the stream into tmpDir with parseable progress and
 // returns a parsed ASS document. onProgress is called with (seconds, fraction)
 // roughly as ffmpeg reports time; it may be nil.
@@ -439,6 +454,23 @@ func MergeTracks(video string, primary, secondary int, outPath, reportPath strin
 	secDoc, err := extractSubtitle(video, sec, tmpDir, "secondary", duration, tick("secondary"))
 	if err != nil {
 		return nil, fmt.Errorf("secondary track: %w", err)
+	}
+
+	// Subtitle PlayRes is often 640x360 even for 1080p video. Upscaling to the
+	// video (capped at 1080p) keeps preview drag/position editing close to one
+	// video pixel per script pixel instead of quantising 1 px to ~3 video px.
+	if vw, vh, err := ProbeVideoSize(video); err == nil && vh > 0 && vw > 0 {
+		targetH := vh
+		if targetH > 1080 {
+			targetH = 1080
+		}
+		_, oldH := playRes(primDoc)
+		if oldH > 0 && float64(targetH) > oldH*1.01 {
+			f := float64(targetH) / oldH
+			scaleDoc(primDoc, f)
+			fmt.Fprintf(os.Stderr, "upscaling subtitles from PlayResY %.0f to %d (x%.3f) for preview precision\n",
+				oldH, targetH, f)
+		}
 	}
 
 	scale := rescaleFactor(primDoc, secDoc)

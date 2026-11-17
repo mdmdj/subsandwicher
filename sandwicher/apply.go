@@ -129,14 +129,10 @@ func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult,
 		before := d.Text
 		switch s.Kind {
 		case "nudge":
-			if reMoveTag.MatchString(d.Text) {
-				d.Text = moveBy(d.Text, s.Dx, s.Dy)
-			} else {
-				if s.At == nil {
-					return nil, fmt.Errorf("window %d suggestion %d has no target anchor", fix.WindowID, fix.SuggestionIndex)
-				}
-				d.Text = setPos(d.Text, *s.At)
+			if s.At == nil && !reMoveTag.MatchString(d.Text) {
+				return nil, fmt.Errorf("window %d suggestion %d has no target anchor", fix.WindowID, fix.SuggestionIndex)
 			}
+			applyPosition(d, s)
 		case "shrink":
 			if s.FontScale <= 0 {
 				return nil, fmt.Errorf("window %d suggestion %d has invalid font scale", fix.WindowID, fix.SuggestionIndex)
@@ -151,8 +147,10 @@ func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult,
 		case "raise":
 			layer := atoiDefault(d.Layer, 0)
 			d.Layer = strconv.Itoa(layer + 1)
+			applyPosition(d, s)
 		case "top":
 			d.Layer = strconv.Itoa(topLayer(doc.Dialogues) + 1)
+			applyPosition(d, s)
 		default:
 			return nil, fmt.Errorf("window %d suggestion %d has unknown kind %q", fix.WindowID, fix.SuggestionIndex, s.Kind)
 		}
@@ -216,6 +214,21 @@ func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult,
 		return nil, err
 	}
 	return res, nil
+}
+
+// applyPosition applies the optional positional part of a fix. Top/raise
+// candidates normally have no position, but a manual override can combine them
+// with a move so dragging an already-raised event still works.
+func applyPosition(d *Dialogue, s Suggestion) {
+	if reMoveTag.MatchString(d.Text) {
+		if s.Dx != 0 || s.Dy != 0 {
+			d.Text = moveBy(d.Text, s.Dx, s.Dy)
+		}
+		return
+	}
+	if s.At != nil {
+		d.Text = setPos(d.Text, *s.At)
+	}
 }
 
 // applyOverride merges a manual edit into a generated candidate. Position edits

@@ -347,6 +347,55 @@ func scaleStyle(s *ASSStyle, f float64) {
 	}
 }
 
+// scaleDoc converts a whole document from one PlayRes to another. Every
+// geometric value moves with it: style metrics, dialogue margins, inline
+// positions/moves/sizes/borders and drawing coordinates. Percentages, angles,
+// colours and timings are left alone.
+func scaleDoc(doc *ASSDoc, f float64) {
+	if doc == nil || f <= 0 || math.Abs(f-1) < 1e-6 {
+		return
+	}
+	px, py := playRes(doc)
+	for _, s := range doc.Styles {
+		scaleStyle(s, f)
+	}
+	for _, d := range doc.Dialogues {
+		d.Text, _ = scaleInlineGeometry(d.Text, f)
+		scaleDialogueMargins(d, f)
+	}
+	setPlayRes(doc, math.Round(px*f), math.Round(py*f))
+}
+
+// setPlayRes updates both the raw [Script Info] lines and the parsed map, so
+// writing the document preserves the new resolution.
+func setPlayRes(doc *ASSDoc, x, y float64) {
+	sx := formatNum(x)
+	sy := formatNum(y)
+	seenX, seenY := false, false
+	out := make([]string, 0, len(doc.InfoRaw)+2)
+	for _, line := range doc.InfoRaw {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		switch {
+		case strings.HasPrefix(lower, "playresx:"):
+			line = "PlayResX: " + sx
+			seenX = true
+		case strings.HasPrefix(lower, "playresy:"):
+			line = "PlayResY: " + sy
+			seenY = true
+		}
+		out = append(out, line)
+	}
+	if !seenX {
+		out = append(out, "PlayResX: "+sx)
+	}
+	if !seenY {
+		out = append(out, "PlayResY: "+sy)
+	}
+	doc.InfoRaw = out
+	doc.Info["playresx"] = sx
+	doc.Info["playresy"] = sy
+}
+
 func scaleDialogueMargins(d *Dialogue, f float64) {
 	for _, p := range []*string{&d.MarginL, &d.MarginR, &d.MarginV} {
 		*p = strings.TrimSpace(*p)

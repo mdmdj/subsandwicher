@@ -204,9 +204,51 @@ async function ensurePreviewAt(videoPath, mergedPath, time) {
 
 function launchPreview(opts) {
   return launchPreviewSession({ ...opts, scriptPath: dragScriptPath }).then((session) => {
-    session.onClientMessage = (args) => handleMpvDrag(args);
+    session.onClientMessage = (args) => handleMpvClientMessage(args);
     return session;
   });
+}
+
+function handleMpvClientMessage(args) {
+  let list = args || [];
+  if (list[0] === 'subsandwicher-drag') {
+    handleMpvDrag(list.slice(1));
+    return;
+  }
+  if (list[0] === 'subsandwicher-base') {
+    list = list.slice(1);
+  }
+  const kind = list[0];
+  if (kind === 'quad' || kind === 'anchor' || kind === 'clear') {
+    handleMpvBase(list);
+    return;
+  }
+  // Older mpv/script combinations may omit the message name.
+  handleMpvDrag(list);
+}
+
+function handleMpvBase(list) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const [kind, ...rest] = list || [];
+  if (kind === 'quad' || kind === 'anchor') {
+    stopPlayback().catch((e) => log('warn', 'pause for base edit failed', e.message));
+  }
+  if (kind === 'quad') {
+    const nums = rest.map(Number);
+    if (nums.length < 8 || nums.some((n) => !Number.isFinite(n))) return;
+    const quad = [];
+    for (let i = 0; i < 8; i += 2) quad.push({ x: nums[i], y: nums[i + 1] });
+    log('info', 'preview base quad', { quad });
+    mainWindow.webContents.send('preview-base', { kind: 'quad', quad });
+  } else if (kind === 'anchor') {
+    const index = Number(rest[0]);
+    if (!Number.isInteger(index)) return;
+    log('info', 'preview base anchor', { index });
+    mainWindow.webContents.send('preview-base', { kind: 'anchor', index });
+  } else if (kind === 'clear') {
+    log('info', 'preview base cleared');
+    mainWindow.webContents.send('preview-base', { kind: 'clear' });
+  }
 }
 
 // Mouse drag/nudge messages from mpv-drag.lua. Down pauses the preview so the
@@ -217,7 +259,7 @@ function handleMpvDrag(args) {
   let list = args || [];
   // JSON IPC may include the script-message name as the first payload arg.
   if (list[0] === 'subsandwicher-drag') list = list.slice(1);
-  const [phase, x, y, mode, time, dx, dy] = list;
+  const [phase, x, y, mode, time, dx, dy, screenW, screenH] = list;
   if (!['down', 'move', 'up', 'cancel', 'nudge', 'reset'].includes(phase)) return;
   if (phase !== 'move') {
     log('info', 'preview drag', { phase, x, y, mode, time, dx, dy });
@@ -238,6 +280,8 @@ function handleMpvDrag(args) {
     time: numOrNull(time),
     dx: numOrNull(dx),
     dy: numOrNull(dy),
+    screenW: numOrNull(screenW),
+    screenH: numOrNull(screenH),
   });
 }
 
@@ -431,6 +475,34 @@ app.whenReady().then(() => {
     }
   });
 
+  ipcMain.handle('preview-set-base', async (_e, { playW, playH, quad, anchors }) => {
+    log('info', 'preview set base', {
+      playW, playH, quads: (quad || []).length, anchors: (anchors || []).length,
+    });
+    if (!activeSession || activeSession.isDead()) return false;
+    const args = ['script-message', 'subsandwicher-set-base', String(playW), String(playH)];
+    for (const p of quad || []) args.push(String(p.x), String(p.y));
+    for (const a of anchors || []) args.push(String(a.x), String(a.y));
+    try {
+      await activeSession.exec(args);
+      return true;
+    } catch (e) {
+      log('warn', 'preview base overlay failed', e.message);
+      return false;
+    }
+  });
+
+  ipcMain.handle('preview-clear-base', async () => {
+    if (!activeSession || activeSession.isDead()) return false;
+    try {
+      await activeSession.exec(['script-message', 'subsandwicher-clear-base']);
+      return true;
+    } catch (e) {
+      log('warn', 'preview base clear failed', e.message);
+      return false;
+    }
+  });
+
   ipcMain.handle('preview-drag-cancel', async () => {
     if (!activeSession || activeSession.isDead()) return false;
     try {
@@ -577,7 +649,7 @@ function pickPreviewTime(events) {
 }
 
 async function saveMerged(payload) {
-  const { mergedPath, videoPath, primaryLang, secondaryLang, reportPath, fixes, comments, statuses } = payload;
+  const { mergedPath, videoPath, primaryLang, secondaryLang, reportPath, fixes, comments, statuses, bases } = payload;
   if (!mergedPath || !fs.existsSync(mergedPath)) {
     log('error', 'no merged file to save', mergedPath);
     return { ok: false, error: 'no merged preview file present' };
@@ -652,6 +724,7 @@ async function saveMerged(payload) {
         applied,
         comments: comments || {},
         statuses: statuses || {},
+        bases: bases || {},
         report,
       };
       fs.writeFileSync(logPath, JSON.stringify(session, null, 2) + '\n');

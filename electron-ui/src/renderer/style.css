@@ -422,6 +422,32 @@ button.move-top-btn.active { background: #3a3a55; border-color: #7a7ae0; color: 
 .group-pick { display: inline-flex; align-items: center; margin-right: 6px; cursor: pointer; }
 .group-pick input { margin: 0; }
 
+.base-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border: 1px solid #3a3a55;
+  border-radius: 6px;
+  background: #222238;
+  font-size: 11px;
+  color: #99a;
+}
+.base-tools-title { color: #dde; margin-right: 4px; }
+button.base-anchor {
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  background: #2c3a2c;
+  border-color: #4a6a4a;
+}
+button.base-anchor:hover { background: #3a4f3a; }
+.base-tools .sug-sub { margin: 0; }
+
 .event-fixes.selected {
   background: rgba(122, 122, 224, 0.10);
   outline: 1px solid rgba(122, 122, 224, 0.55);

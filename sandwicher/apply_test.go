@@ -758,3 +758,42 @@ func TestApplyReportsRemainingAndOffFrame(t *testing.T) {
 		t.Error("edge placement should not be fully out of frame")
 	}
 }
+
+func TestApplyTopWithPositionOverride(t *testing.T) {
+	assPath, reportPath, rep := writeMergedFixture(t)
+	w := rep.Windows[0]
+	var top *Suggestion
+	for _, g := range w.ByEvent {
+		if s := suggestionOfKind(w, g.Event, "top"); s != nil {
+			top = s
+			break
+		}
+	}
+	if top == nil {
+		t.Fatal("no top candidate")
+	}
+	p := Point{X: 200, Y: 250}
+	out := filepath.Join(t.TempDir(), "out.ass")
+	res, err := ApplyFixes(assPath, reportPath, out, []Fix{{
+		WindowID: w.ID, SuggestionIndex: top.ID,
+		Override: &FixOverride{At: &p},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Applied) != 1 || res.Applied[0].Kind != "top" {
+		t.Fatalf("applied = %+v", res.Applied)
+	}
+	data, _ := os.ReadFile(out)
+	lines := dialogueLinesForTest(string(data))
+	if top.Event >= len(lines) {
+		t.Fatalf("event %d outside output", top.Event)
+	}
+	layer := strings.SplitN(strings.TrimPrefix(lines[top.Event], "Dialogue: "), ",", 2)[0]
+	if layer != "1" {
+		t.Errorf("layer = %q, want 1", layer)
+	}
+	if !strings.Contains(lines[top.Event], `\pos(200,250)`) {
+		t.Errorf("top+position did not write pos:\n%s", lines[top.Event])
+	}
+}

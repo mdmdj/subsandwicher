@@ -16,6 +16,8 @@ let state = {
   groupSel: {}, // window id -> { event id -> true } selection for group move
   selected: null, // { windowId, eventId } picked in the mpv preview
   drag: null, // active preview drag state
+  bases: {}, // "window:event" -> { quad, anchors } referent box
+  pendingBase: null, // base drawn before a subtitle is selected
   fixWarnings: {}, // "window:event" -> applied fix with geometry warnings
   recheck: [], // remaining conflicts from the last apply (estimated)
   playbackPos: null, // { time, start, end } from the main process while playing
@@ -200,6 +202,8 @@ function resetToLoad(message = '') {
   state.recheck = [];
   state.selected = null;
   state.drag = null;
+  state.bases = {};
+  state.pendingBase = null;
   state.statuses = {};
   state.windowScroll = {};
   state.playingWindow = null;
@@ -258,6 +262,8 @@ async function loadVideo(p) {
     state.recheck = [];
     state.selected = null;
     state.drag = null;
+    state.bases = {};
+    state.pendingBase = null;
     state.statuses = {};
     state.windowScroll = {};
     state.playingWindow = null;
@@ -416,6 +422,8 @@ async function eject() {
   state.recheck = [];
   state.selected = null;
   state.drag = null;
+  state.bases = {};
+  state.pendingBase = null;
   state.statuses = {};
   state.windowScroll = {};
   state.playingWindow = null;
@@ -473,6 +481,8 @@ btnPreview.addEventListener('click', async () => {
     state.recheck = [];
     state.selected = null;
     state.drag = null;
+    state.bases = {};
+    state.pendingBase = null;
     state.statuses = {};
     state.windowScroll = {};
     state.playingWindow = null;
@@ -490,6 +500,7 @@ btnPreview.addEventListener('click', async () => {
       reportPath: stats.report_path,
       seekTo: close,
     });
+    syncBaseToPreview();
     if (state.review) {
       setStatus(`preview open. ${(state.review.windows || []).length} review window(s), ` +
         `${(state.review.conflicts || []).length} conflict(s). Pick a window, then "Copy state" to report it.`);
@@ -533,6 +544,7 @@ async function dblSave() {
       fixes: chosenFixes(),
       comments: { ...state.notes },
       statuses: { ...state.statuses },
+      bases: { ...state.bases },
     });
     if (res.ok) {
       let msg = `saved: ${res.dest}`;
@@ -694,6 +706,7 @@ function selectWindow(id, scroll = true, seek = false) {
   }
   state.reviewWindow = w;
   reviewNote.value = state.notes[id] || '';
+  syncBaseToPreview();
 
   for (const row of windowList.querySelectorAll('.wrow')) {
     row.classList.toggle('active', Number(row.dataset.id) === id);
@@ -1042,7 +1055,8 @@ function renderWindowDetail(w) {
   const chosenForWindow = state.chosen[w.id] || {};
   windowSuggestions.innerHTML = '<h3>Fix candidates</h3>' +
     '<div class="sug-sub" style="margin:0 0 6px">Choose a fix per event; Original keeps it unchanged. Selected fixes apply on save. ' +
-    'You can also click/drag a subtitle in the preview window: Shift locks an axis, Alt moves finer, arrow keys nudge, R resets.</div>';
+    'Click/drag a subtitle in the preview (Shift axis, Alt fine, arrows nudge, R reset). ' +
+    'Ctrl+drag marks the translated area; Ctrl+drag its corners or red handle reshapes/rotates it; click a green anchor (or the arrow buttons below) to place the selected subtitle; B clears the base.</div>';
 
   const groupBar = document.createElement('div');
   groupBar.className = 'group-move-bar';
@@ -1053,6 +1067,7 @@ function renderWindowDetail(w) {
     '<label>dy <input class="group-dy" type="number" step="1" value="0"></label>' +
     '<button type="button" class="small group-apply" disabled>Move selected</button>' +
     '<button type="button" class="small minor group-clear" disabled>Clear selection</button>' +
+    '<button type="button" class="small minor base-clear" disabled>Clear base</button>' +
     '<span class="sug-sub">Tick one or more event headings, then move them together.</span>';
   groupBar.querySelector('.group-apply').addEventListener('click', () => {
     const dx = Number(groupBar.querySelector('.group-dx').value) || 0;
@@ -1064,7 +1079,19 @@ function renderWindowDetail(w) {
     for (const cb of windowSuggestions.querySelectorAll('.group-pick input')) cb.checked = false;
     updateGroupMoveBar(w);
   });
+  groupBar.querySelector('.base-clear').addEventListener('click', () => {
+    const sel = state.selected;
+    if (sel && sel.windowId === w.id) delete state.bases[baseKey(w, sel.eventId)];
+    state.pendingBase = null;
+    syncBaseToPreview();
+    refreshBaseTools(w);
+    setStatus('base cleared');
+  });
   windowSuggestions.appendChild(groupBar);
+  const baseTools = document.createElement('div');
+  baseTools.id = 'base-tools';
+  baseTools.className = 'base-tools hidden';
+  windowSuggestions.appendChild(baseTools);
 
   const suggestions = w.suggestions || [];
   const groups = windowGroups(w);
@@ -1195,6 +1222,7 @@ function renderWindowDetail(w) {
     windowSuggestions.appendChild(wrap);
   }
   updateGroupMoveBar(w);
+  refreshBaseTools(w);
   refreshRecheckNotice(w);
   updatePlaybackStickyOffset();
 }
@@ -1342,21 +1370,28 @@ function effectiveEdit(edit, s) {
 
 function baseNudgeFor(w, eventId) {
   const g = (w.byEvent || []).find(x => x.event === eventId);
-  if (!g) return null;
   const chosenId = (state.chosen[w.id] || {})[eventId];
   if (Number.isInteger(chosenId)) {
     const s = (w.suggestions || [])[chosenId];
     if (!s) return null;
-    if (s.kind !== 'nudge' && s.kind !== 'shrink') return null;
+    if (s.kind !== 'nudge' && s.kind !== 'shrink' && s.kind !== 'top' && s.kind !== 'raise') return null;
     return { id: chosenId, s };
   }
-  let shrink = null;
-  for (const id of g.suggestionIds || []) {
-    const s = (w.suggestions || [])[id];
-    if (s && s.kind === 'nudge') return { id, s };
-    if (s && s.kind === 'shrink' && !shrink) shrink = { id, s };
+  if (g) {
+    let shrink = null;
+    for (const id of g.suggestionIds || []) {
+      const s = (w.suggestions || [])[id];
+      if (s && s.kind === 'nudge') return { id, s };
+      if (s && s.kind === 'shrink' && !shrink) shrink = { id, s };
+    }
+    if (shrink) return shrink;
   }
-  return shrink;
+  // Fallback for events outside a byEvent group or with no nudge: any
+  // non-hide candidate can still get a positional override (top/raise support
+  // an additional position).
+  const idx = (w.suggestions || []).findIndex(s => s.event === eventId && s.kind !== 'hide');
+  if (idx >= 0) return { id: idx, s: w.suggestions[idx] };
+  return null;
 }
 
 function moveEventsBy(w, eventIds, dx, dy, opts = {}) {
@@ -1368,16 +1403,17 @@ function moveEventsBy(w, eventIds, dx, dy, opts = {}) {
     const hadChosen = Number.isInteger(chosen[eventId]);
     const base = baseNudgeFor(w, eventId);
     if (!base) { skipped++; continue; }
+    const ev = reviewEvents().get(eventId);
+    if (!ev) { skipped++; continue; }
     const key = editKey(w, eventId);
     const stored = state.edits[key];
+    const baseBox = eventBaseBox(ev, ev.exactSeek, false);
     let edit;
     if (!hadChosen) {
       // No chosen candidate yet: move from the event's current/original
       // position, not from the candidate's own offset.
-      const ev = reviewEvents().get(eventId);
-      const baseBox = ev ? eventBaseBox(ev, ev.exactSeek) : null;
-      if (!ev || !baseBox) { skipped++; continue; }
-      if (base.s.at) {
+      if (!ev.moving) {
+        if (!baseBox && !ev.pos) { skipped++; continue; }
         const origAnchor = ev.pos
           ? { x: Number(ev.pos.x), y: Number(ev.pos.y) }
           : anchorForBoxJS(baseBox, ev.align);
@@ -1407,19 +1443,43 @@ function moveEventsBy(w, eventIds, dx, dy, opts = {}) {
       edit = stored && stored.suggestionId === base.id
         ? { ...stored, at: stored.at ? { ...stored.at } : null }
         : editBase(base.id, base.s);
-      const eff = effectiveEdit(edit, base.s);
-      if (base.s.at) {
-        edit.at = { x: eff.at.x + dx, y: eff.at.y + dy };
-        edit.posTouched = true;
-        edit.dx = eff.dx;
-        edit.dy = eff.dy;
+      if (base.s.kind === 'top' || base.s.kind === 'raise') {
+        // Draw-order fixes have no intrinsic position, but a drag can add one
+        // while preserving the layer change.
+        if (ev.moving) {
+          edit.dx = (Number(edit.dx) || 0) + dx;
+          edit.dy = (Number(edit.dy) || 0) + dy;
+          edit.at = null;
+          edit.posTouched = false;
+        } else {
+          if (!baseBox && !ev.pos) { skipped++; continue; }
+          const origAnchor = ev.pos
+            ? { x: Number(ev.pos.x), y: Number(ev.pos.y) }
+            : anchorForBoxJS(baseBox, ev.align);
+          const curAt = edit.posTouched && edit.at
+            ? { x: Number(edit.at.x), y: Number(edit.at.y) }
+            : { x: origAnchor.x + (Number(edit.dx) || 0), y: origAnchor.y + (Number(edit.dy) || 0) };
+          edit.at = { x: curAt.x + dx, y: curAt.y + dy };
+          edit.posTouched = true;
+          edit.dx = 0;
+          edit.dy = 0;
+        }
+        edit.dirty = true;
       } else {
-        edit.dx = eff.dx + dx;
-        edit.dy = eff.dy + dy;
-        edit.at = null;
-        edit.posTouched = false;
+        const eff = effectiveEdit(edit, base.s);
+        if (base.s.at) {
+          edit.at = { x: eff.at.x + dx, y: eff.at.y + dy };
+          edit.posTouched = true;
+          edit.dx = eff.dx;
+          edit.dy = eff.dy;
+        } else {
+          edit.dx = eff.dx + dx;
+          edit.dy = eff.dy + dy;
+          edit.at = null;
+          edit.posTouched = false;
+        }
+        edit.dirty = true;
       }
-      edit.dirty = true;
     }
     edit.override = overrideForEdit(edit, base.s);
     chosen[eventId] = base.id;
@@ -1427,7 +1487,8 @@ function moveEventsBy(w, eventIds, dx, dy, opts = {}) {
     moved++;
   }
   if (!moved) {
-    setStatus(`${opts.source || 'move'}: no movable events selected`, true);
+    setStatus(`${opts.source || 'move'}: no positional candidate for the selected event(s); ` +
+      'choose a nudge first or move it with the numeric editor', true);
     return 0;
   }
   const scroll = windowDetail.scrollTop;
@@ -1437,7 +1498,8 @@ function moveEventsBy(w, eventIds, dx, dy, opts = {}) {
   applyPreviewTo(state.pausedWindow === w.id ? null : eventSeek(w, eventIds[0]));
   const verb = opts.source === 'drag' ? 'drag'
     : opts.source === 'nudge' ? 'nudge'
-      : opts.source === 'group' ? 'group move' : 'move';
+      : opts.source === 'anchor' ? 'anchor'
+        : opts.source === 'group' ? 'group move' : 'move';
   setStatus(`${verb}: ${moved} event(s) by ${signed(dx)},${signed(dy)}` +
     (skipped ? `; ${skipped} skipped (non-positional fix)` : ''));
   return moved;
@@ -1486,31 +1548,91 @@ function boxFromAnchorJS(p, w, h, align) {
   return { x0, y0, x1: x0 + w, y1: y0 + h };
 }
 
-function eventBaseBox(ev, time) {
-  // Static events use the estimated box: it is the box the placement engine
-  // and candidate anchors were derived from. Moving events need the exact box
-  // at the paused seek because their lifetime bbox spans the whole path.
-  if (!ev.moving) return ev.bbox || ev.exactBBox || null;
-  if (ev.exactBBox && Number.isFinite(ev.exactSeek) && Math.abs(time - ev.exactSeek) <= 0.2) {
-    return ev.exactBBox;
+function moveTagFromRaw(raw) {
+  if (!raw) return null;
+  const m = raw.match(/\\move\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)(?:\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+))?\s*\)/);
+  if (!m) return null;
+  return {
+    x1: Number(m[1]), y1: Number(m[2]), x2: Number(m[3]), y2: Number(m[4]),
+    t1: m[5] != null ? Number(m[5]) : 0,
+    t2: m[6] != null ? Number(m[6]) : null,
+  };
+}
+
+function movePointAt(mv, relSec, durSec) {
+  const t1 = mv.t1 || 0;
+  const t2 = mv.t2 == null ? durSec * 1000 : mv.t2;
+  if (t2 <= t1) return { x: mv.x2, y: mv.y2 };
+  const f = Math.max(0, Math.min(1, (relSec * 1000 - t1) / (t2 - t1)));
+  return {
+    x: mv.x1 + (mv.x2 - mv.x1) * f,
+    y: mv.y1 + (mv.y2 - mv.y1) * f,
+  };
+}
+
+function movingBoxAt(ev, time, exactBBox) {
+  const mv = moveTagFromRaw(ev.raw);
+  if (!mv || !exactBBox || !Number.isFinite(ev.exactSeek)) return null;
+  const dur = Math.max(0, ev.end - ev.start);
+  const pe = movePointAt(mv, ev.exactSeek - ev.start, dur);
+  const pn = movePointAt(mv, time - ev.start, dur);
+  const dx = pn.x - pe.x;
+  const dy = pn.y - pe.y;
+  return {
+    x0: exactBBox.x0 + dx, y0: exactBBox.y0 + dy,
+    x1: exactBBox.x1 + dx, y1: exactBBox.y1 + dy,
+  };
+}
+
+function eventBaseBox(ev, time, visual) {
+  // Interactive boxes use the exact ink box when it is valid, so the drag ghost
+  // hugs the actual glyphs. Anchor math (visual=false) keeps the estimated box,
+  // which is what the placement engine used to derive candidate anchors.
+  if (!ev.moving) {
+    if (visual && ev.exactBBox) return ev.exactBBox;
+    return ev.bbox || ev.exactBBox || null;
   }
-  return ev.bbox || null;
+  if (visual && ev.exactBBox) {
+    // The exact box was measured at exactSeek. Translate it along \move so the
+    // event stays draggable at any paused frame, not only at that seek.
+    const moved = movingBoxAt(ev, time, ev.exactBBox);
+    if (moved) return moved;
+    if (Number.isFinite(ev.exactSeek) && Math.abs(time - ev.exactSeek) <= 0.2) return ev.exactBBox;
+  }
+  return ev.bbox || ev.exactBBox || null;
 }
 
 // Current on-screen box for an event in the preview, including its chosen fix
 // and any manual override. Used for hit-testing and the drag ghost.
-function eventCurrentGeometry(w, eventId, ev, time) {
-  const base = eventBaseBox(ev, time);
+function eventCurrentGeometry(w, eventId, ev, time, visual = true) {
+  const base = eventBaseBox(ev, time, visual);
   if (!base) return null;
   const bw = base.x1 - base.x0;
   const bh = base.y1 - base.y0;
   const chosenId = (state.chosen[w.id] || {})[eventId];
   const s = Number.isInteger(chosenId) ? (w.suggestions || [])[chosenId] : null;
-  if (!s || (s.kind !== 'nudge' && s.kind !== 'shrink')) {
-    return { box: base };
-  }
+  if (!s) return { box: base };
   const key = editKey(w, eventId);
   const stored = state.edits[key];
+  if (s.kind === 'top' || s.kind === 'raise') {
+    const edit = stored && stored.suggestionId === chosenId ? stored : null;
+    if (!edit) return { box: base };
+    if (ev.moving) {
+      const dx = Number(edit.dx) || 0;
+      const dy = Number(edit.dy) || 0;
+      return { box: { x0: base.x0 + dx, y0: base.y0 + dy, x1: base.x1 + dx, y1: base.y1 + dy } };
+    }
+    const origAnchor = ev.pos
+      ? { x: Number(ev.pos.x), y: Number(ev.pos.y) }
+      : anchorForBoxJS(base, ev.align);
+    const at = edit.posTouched && edit.at
+      ? { x: Number(edit.at.x), y: Number(edit.at.y) }
+      : { x: origAnchor.x + (Number(edit.dx) || 0), y: origAnchor.y + (Number(edit.dy) || 0) };
+    return { box: boxFromAnchorJS(at, bw, bh, ev.align) };
+  }
+  if (s.kind !== 'nudge' && s.kind !== 'shrink') {
+    return { box: base };
+  }
   const edit = stored && stored.suggestionId === chosenId ? stored : editBase(chosenId, s);
   const eff = effectiveEdit(edit, s);
   let scale = 1;
@@ -1537,6 +1659,7 @@ function hitTestPreviewEvent(w, nx, ny, time) {
   const y = ny * play.h;
   const map = reviewEvents();
   let best = null;
+  let nearest = null;
   for (const id of windowEventIds(w)) {
     const ev = map.get(id);
     if (!ev) continue;
@@ -1548,22 +1671,25 @@ function hitTestPreviewEvent(w, nx, ny, time) {
     let layer = Number(ev.layer) || 0;
     if (chosenS && chosenS.kind === 'top') layer = 1000000;
     else if (chosenS && chosenS.kind === 'raise') layer += 1;
-    if (ev.moving) {
-      if (!ev.exactBBox || !Number.isFinite(ev.exactSeek) || Math.abs(time - ev.exactSeek) > 0.2) continue;
-    } else if (time < ev.start - 0.1 || time > ev.end + 0.1) {
-      continue;
-    }
+    if (time < ev.start - 0.1 || time > ev.end + 0.1) continue;
     const geom = eventCurrentGeometry(w, id, ev, time);
     if (!geom) continue;
     const b = geom.box;
-    const pad = 4;
-    if (x >= b.x0 - pad && x <= b.x1 + pad && y >= b.y0 - pad && y <= b.y1 + pad) {
+    const pad = Math.max(4, play.h * 0.012);
+    const dx = x < b.x0 ? b.x0 - x : x > b.x1 ? x - b.x1 : 0;
+    const dy = y < b.y0 ? b.y0 - y : y > b.y1 ? y - b.y1 : 0;
+    const dist = Math.hypot(dx, dy);
+    const key = layer * 1000000 + id;
+    if (dist === 0) {
       // Higher layers draw on top; within a layer, later events win.
-      const key = layer * 1000000 + id;
       if (!best || key > best.key) best = { eventId: id, box: b, key };
+    } else if (dist <= pad * 2 && (!nearest || key > nearest.key || dist < nearest.dist)) {
+      // Forgiving grab: pick the nearest visible event when the click lands
+      // just outside its glyphs.
+      if (!nearest || dist < nearest.dist) nearest = { eventId: id, box: b, key, dist };
     }
   }
-  return best;
+  return best || nearest;
 }
 
 function previewDragEventIds(w, hitId) {
@@ -1598,7 +1724,10 @@ function snapPreviewDrag(drag, dx, dy) {
     u.x1 = Math.max(u.x1, b.x1 + dx);
     u.y1 = Math.max(u.y1, b.y1 + dy);
   }
-  const threshold = 6 * (drag.playH / 360);
+  // Snap within ~6 screen pixels, not 6 PlayRes pixels: a 640x360 script on a
+  // 1080p video would otherwise feel sticky (18 video px).
+  const pxPerScript = drag.screenW > 0 && drag.playW > 0 ? drag.screenW / drag.playW : 1;
+  const threshold = 6 / (pxPerScript || 1);
   const safeX0 = drag.playW * 0.05;
   const safeX1 = drag.playW * 0.95;
   const safeY0 = drag.playH * 0.05;
@@ -1642,6 +1771,201 @@ function snapPreviewDrag(drag, dx, dy) {
   return { dx: Math.round(dx * 10) / 10, dy: Math.round(dy * 10) / 10 };
 }
 
+const BASE_ANCHOR_IDS = [
+  'above', 'above-right', 'right', 'below-right',
+  'below', 'below-left', 'left', 'above-left', 'center',
+];
+
+function baseKey(w, eventId) { return `${w.id}:${eventId}`; }
+
+function computeBaseAnchors(quad, playH) {
+  const [tl, tr, br, bl] = quad;
+  const center = {
+    x: (tl.x + tr.x + br.x + bl.x) / 4,
+    y: (tl.y + tr.y + br.y + bl.y) / 4,
+  };
+  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  const add = (p, v, k) => ({ x: p.x + v.x * k, y: p.y + v.y * k });
+  const outward = (p) => {
+    const dx = p.x - center.x;
+    const dy = p.y - center.y;
+    const len = Math.hypot(dx, dy) || 1;
+    return { x: dx / len, y: dy / len };
+  };
+  const gap = Math.max(4, playH * 0.022);
+  const top = mid(tl, tr);
+  const bottom = mid(bl, br);
+  const left = mid(tl, bl);
+  const right = mid(tr, br);
+  const points = {
+    above: add(top, outward(top), gap),
+    'above-right': add(tr, outward(tr), gap * 1.2),
+    right: add(right, outward(right), gap),
+    'below-right': add(br, outward(br), gap * 1.2),
+    below: add(bottom, outward(bottom), gap),
+    'below-left': add(bl, outward(bl), gap * 1.2),
+    left: add(left, outward(left), gap),
+    'above-left': add(tl, outward(tl), gap * 1.2),
+    center,
+  };
+  return BASE_ANCHOR_IDS.map((id) => ({ id, x: points[id].x, y: points[id].y }));
+}
+
+function refreshBaseTools(w) {
+  const host = document.getElementById('base-tools');
+  if (!host || !w) return;
+  const sel = state.selected;
+  let b = null;
+  if (sel && sel.windowId === w.id) b = state.bases[baseKey(w, sel.eventId)];
+  if (!b && state.pendingBase) {
+    host.classList.remove('hidden');
+    host.innerHTML = '<span class="base-tools-title">Base pending</span>' +
+      '<span class="sug-sub">Click a subtitle in the preview to attach it.</span>';
+    return;
+  }
+  if (!b || !sel) {
+    host.classList.add('hidden');
+    host.innerHTML = '';
+    return;
+  }
+  const anchors = computeBaseAnchors(b.quad, previewPlayRes().h);
+  const glyphs = ['↑', '↗', '→', '↘', '↓', '↙', '←', '↖', '●'];
+  const names = ['above', 'above-right', 'right', 'below-right', 'below', 'below-left', 'left', 'above-left', 'centre'];
+  host.classList.remove('hidden');
+  host.innerHTML = `<span class="base-tools-title">Place #${sel.eventId}</span>` +
+    anchors.map((a, i) =>
+      `<button type="button" class="base-anchor" data-i="${i}" title="${names[i]}">${glyphs[i]}</button>`).join('') +
+    '<button type="button" class="small minor base-tools-clear">Clear base</button>';
+  host.querySelectorAll('.base-anchor').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const index = Number(btn.dataset.i);
+      if (anchors[index]) placeAtBaseAnchor(w, sel.eventId, anchors[index]);
+    });
+  });
+  host.querySelector('.base-tools-clear').addEventListener('click', () => {
+    delete state.bases[baseKey(w, sel.eventId)];
+    state.pendingBase = null;
+    syncBaseToPreview();
+    refreshBaseTools(w);
+    setStatus('base cleared');
+  });
+}
+
+function currentPreviewTime(w) {
+  if (state.playbackPos && Number.isFinite(state.playbackPos.time)) return state.playbackPos.time;
+  return w.peak;
+}
+
+function syncBaseToPreview() {
+  const w = state.reviewWindow;
+  const sel = state.selected;
+  const hasBase = !!(w && sel && sel.windowId === w.id && state.bases[baseKey(w, sel.eventId)]);
+  const btn = windowSuggestions.querySelector('.base-clear');
+  if (btn) btn.disabled = !(hasBase || state.pendingBase);
+  if (!S.setBase) return;
+  const play = previewPlayRes();
+  if (!hasBase && !state.pendingBase) {
+    // Still send the PlayRes so the Lua base editor knows the coordinate space
+    // before the first base exists.
+    S.setBase({ playW: play.w, playH: play.h, quad: [], anchors: [] });
+    return;
+  }
+  const b = hasBase ? state.bases[baseKey(w, sel.eventId)] : state.pendingBase;
+  b.anchors = computeBaseAnchors(b.quad, play.h);
+  S.setBase({ playW: play.w, playH: play.h, quad: b.quad, anchors: b.anchors });
+}
+
+function placeAtBaseAnchor(w, eventId, anchor) {
+  const ev = reviewEvents().get(eventId);
+  if (!ev) return;
+  const b = state.bases[baseKey(w, eventId)];
+  const time = b && Number.isFinite(b.time) ? b.time : currentPreviewTime(w);
+  const geom = eventCurrentGeometry(w, eventId, ev, time);
+  if (!geom) return;
+  const cw = geom.box.x1 - geom.box.x0;
+  const ch = geom.box.y1 - geom.box.y0;
+  const a = anchor;
+  let target;
+  switch (a.id) {
+    case 'above':
+      target = { x0: a.x - cw / 2, y0: a.y - ch, x1: a.x + cw / 2, y1: a.y };
+      break;
+    case 'below':
+      target = { x0: a.x - cw / 2, y0: a.y, x1: a.x + cw / 2, y1: a.y + ch };
+      break;
+    case 'left':
+      target = { x0: a.x - cw, y0: a.y - ch / 2, x1: a.x, y1: a.y + ch / 2 };
+      break;
+    case 'right':
+      target = { x0: a.x, y0: a.y - ch / 2, x1: a.x + cw, y1: a.y + ch / 2 };
+      break;
+    case 'above-left':
+      target = { x0: a.x - cw, y0: a.y - ch, x1: a.x, y1: a.y };
+      break;
+    case 'above-right':
+      target = { x0: a.x, y0: a.y - ch, x1: a.x + cw, y1: a.y };
+      break;
+    case 'below-left':
+      target = { x0: a.x - cw, y0: a.y, x1: a.x, y1: a.y + ch };
+      break;
+    case 'below-right':
+      target = { x0: a.x, y0: a.y, x1: a.x + cw, y1: a.y + ch };
+      break;
+    default: // center
+      target = { x0: a.x - cw / 2, y0: a.y - ch / 2, x1: a.x + cw / 2, y1: a.y + ch / 2 };
+  }
+  const dx = target.x0 - geom.box.x0;
+  const dy = target.y0 - geom.box.y0;
+  moveEventsBy(w, [eventId], dx, dy, { source: 'anchor' });
+  setStatus(`placed #${eventId} ${a.id} the base`);
+}
+
+function handlePreviewBase(p) {
+  if (!p || !state.reviewWindow) return;
+  const w = state.reviewWindow;
+  if (p.kind === 'quad' || p.kind === 'anchor') {
+    if (state.playingWindow === w.id) {
+      state.playingWindow = null;
+      state.pausedWindow = w.id;
+      updatePlaybackButtons();
+    }
+  }
+  if (p.kind === 'quad') {
+    if (!p.quad || p.quad.length !== 4) return;
+    const sel = state.selected;
+    if (!sel || sel.windowId !== w.id) {
+      state.pendingBase = { quad: p.quad, time: currentPreviewTime(w) };
+      syncBaseToPreview();
+      refreshBaseTools(w);
+      setStatus('base saved; click a subtitle in the preview to attach it');
+      return;
+    }
+    const key = baseKey(w, sel.eventId);
+    state.pendingBase = null;
+    state.bases[key] = { quad: p.quad, time: currentPreviewTime(w) };
+    syncBaseToPreview();
+    refreshBaseTools(w);
+    setStatus(`base set for #${sel.eventId}; click an anchor (in mpv or below) to place it`);
+  } else if (p.kind === 'anchor') {
+    const sel = state.selected;
+    if (!sel || sel.windowId !== w.id) return;
+    const b = state.bases[baseKey(w, sel.eventId)];
+    if (!b) return;
+    const anchors = computeBaseAnchors(b.quad, previewPlayRes().h);
+    const a = anchors[p.index];
+    if (a) placeAtBaseAnchor(w, sel.eventId, a);
+  } else if (p.kind === 'clear') {
+    const sel = state.selected;
+    if (sel && sel.windowId === w.id) {
+      delete state.bases[baseKey(w, sel.eventId)];
+    }
+    state.pendingBase = null;
+    syncBaseToPreview();
+    refreshBaseTools(w);
+    setStatus('base cleared');
+  }
+}
+
 function highlightPreviewSelection(w) {
   const sel = state.selected;
   for (const el of windowSuggestions.querySelectorAll('.event-fixes[data-event]')) {
@@ -1668,6 +1992,8 @@ function handlePreviewDrag(p) {
       state.selected = null;
       state.drag = null;
       highlightPreviewSelection(w);
+      syncBaseToPreview();
+      refreshBaseTools(w);
       if (S.dragBoxes) S.dragBoxes({ playW: play.w, playH: play.h, boxes: [] });
       // Don't let a click on empty video stop an otherwise-playing window.
       if (wasPlaying) {
@@ -1688,9 +2014,16 @@ function handlePreviewDrag(p) {
     state.drag = {
       windowId: w.id, eventIds: ids, hitEvent: hit.eventId, mode: p.mode, time: t,
       boxes, playW: play.w, playH: play.h,
+      screenW: p.screenW, screenH: p.screenH,
     };
     state.selected = { windowId: w.id, eventId: hit.eventId };
+    if (state.pendingBase) {
+      state.bases[baseKey(w, hit.eventId)] = state.pendingBase;
+      state.pendingBase = null;
+    }
     highlightPreviewSelection(w);
+    syncBaseToPreview();
+    refreshBaseTools(w);
     const el = windowSuggestions.querySelector(`.event-fixes[data-event="${hit.eventId}"]`);
     if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
     if (S.dragBoxes) S.dragBoxes({ playW: play.w, playH: play.h, boxes });
@@ -1893,6 +2226,8 @@ function basePayload() {
     chosen: chosenFixes(),
     comments: { ...state.notes },
     statuses: { ...state.statuses },
+    bases: state.bases,
+    pendingBase: state.pendingBase,
     recheck: state.recheck,
     fixWarnings: state.fixWarnings,
     paths: {
@@ -1994,6 +2329,10 @@ if (S.onPlaybackPosition) {
 
 if (S.onPreviewDrag) {
   S.onPreviewDrag(handlePreviewDrag);
+}
+
+if (S.onPreviewBase) {
+  S.onPreviewBase(handlePreviewBase);
 }
 
 // Registered once so repeated merges do not stack listeners.

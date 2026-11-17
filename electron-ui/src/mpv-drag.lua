@@ -24,6 +24,18 @@ local drag = {
 local overlay = mp.create_osd_overlay('ass-events')
 overlay.z = 2000
 
+-- Referent/base quad and its clickable anchor points. The app computes the
+-- anchor positions and sends them; this script draws and hit-tests them.
+local base = {
+  playW = 0,
+  playH = 0,
+  quad = nil,   -- { {x,y}, {x,y}, {x,y}, {x,y} } in PlayRes
+  anchors = {}, -- { {x,y}, ... } in PlayRes, fixed order
+  edit = nil,
+}
+local baseOverlay = mp.create_osd_overlay('ass-events')
+baseOverlay.z = 1500
+
 local function video_rect()
   local d = mp.get_property_native('osd-dimensions')
   if not d then return nil end
@@ -34,9 +46,11 @@ local function video_rect()
 end
 
 local function send(phase, x, y, time, dx, dy)
+  local _, sw, sh = video_rect()
   mp.commandv('script-message', 'subsandwicher-drag', phase,
     tostring(x or ''), tostring(y or ''), tostring(drag.mode or 'normal'),
-    tostring(time or ''), tostring(dx or ''), tostring(dy or ''))
+    tostring(time or ''), tostring(dx or ''), tostring(dy or ''),
+    tostring(sw or 0), tostring(sh or 0))
 end
 
 local function ghost_data()
@@ -92,6 +106,10 @@ local function update_drag()
   update_ghost()
 end
 
+-- Forward declarations: begin_drag is defined before the base helpers but may
+-- run only after the whole script has loaded.
+local send_base, screen_of, screen_dist
+
 local function begin_drag(mode)
   return function(e)
     if e.canceled then
@@ -103,6 +121,16 @@ local function begin_drag(mode)
       local m = mp.get_property_native('mouse-pos')
       if not d or not m then return end
       local key = string.lower(e.key_name or '')
+      if key:find('ctrl', 1, true) then return end
+      -- A click on one of the referent anchor handles places the selected sign.
+      if base.quad and #base.anchors > 0 then
+        for i, a in ipairs(base.anchors) do
+          if screen_dist(m, screen_of(a)) <= 24 then
+            send_base('anchor', i - 1)
+            return
+          end
+        end
+      end
       local effective = mode
       if key:find('shift', 1, true) then
         effective = 'axis'
@@ -133,6 +161,220 @@ local function begin_drag(mode)
     -- repeat is intentionally ignored
   end
 end
+
+local unpack = table.unpack or unpack
+send_base = function(kind, ...)
+  local args = { ... }
+  local str = {}
+  for i = 1, #args do str[i] = tostring(args[i]) end
+  mp.commandv('script-message', 'subsandwicher-base', kind, unpack(str))
+end
+
+local function midpoint(a, b) return { x = (a.x + b.x) / 2, y = (a.y + b.y) / 2 } end
+local function quad_center(q)
+  return {
+    x = (q[1].x + q[2].x + q[3].x + q[4].x) / 4,
+    y = (q[1].y + q[2].y + q[3].y + q[4].y) / 4,
+  }
+end
+local function rotation_point()
+  if not base.quad then return nil end
+  local top = midpoint(base.quad[1], base.quad[2])
+  local c = quad_center(base.quad)
+  local dx, dy = top.x - c.x, top.y - c.y
+  local len = math.sqrt(dx * dx + dy * dy)
+  if len < 0.001 then return top end
+  local off = math.max(8, base.playH * 0.07)
+  return { x = top.x + dx / len * off, y = top.y + dy / len * off }
+end
+screen_of = function(p)
+  local d, w, h = video_rect()
+  if not d or not p or base.playW <= 0 or base.playH <= 0 then return nil end
+  return {
+    x = (d.ml or 0) + p.x / base.playW * w,
+    y = (d.mt or 0) + p.y / base.playH * h,
+  }
+end
+local function play_of(m)
+  local d, w, h = video_rect()
+  if not d or not m or base.playW <= 0 or base.playH <= 0 then return nil end
+  return {
+    x = (m.x - (d.ml or 0)) / w * base.playW,
+    y = (m.y - (d.mt or 0)) / h * base.playH,
+  }
+end
+screen_dist = function(a, b)
+  if not a or not b then return 1e9 end
+  local dx, dy = a.x - b.x, a.y - b.y
+  return math.sqrt(dx * dx + dy * dy)
+end
+local function angle_of(p, c)
+  local dx, dy = p.x - c.x, p.y - c.y
+  if math.atan2 then return math.atan2(dy, dx) end
+  return math.atan(dy, dx)
+end
+local function rotate_point(p, c, a)
+  local dx, dy = p.x - c.x, p.y - c.y
+  local ca, sa = math.cos(a), math.sin(a)
+  return { x = c.x + dx * ca - dy * sa, y = c.y + dx * sa + dy * ca }
+end
+local function copy_quad(q)
+  local out = {}
+  for i = 1, 4 do out[i] = { x = q[i].x, y = q[i].y } end
+  return out
+end
+
+local function shape(points, color, alpha, border)
+  local parts = {}
+  for i, p in ipairs(points) do
+    parts[#parts + 1] = string.format('%s %.2f %.2f', i == 1 and 'm' or 'l', p.x, p.y)
+  end
+  return string.format(
+    '{\\an7\\pos(0,0)\\p1\\bord%.1f\\shad0\\1c&H%s&\\1a&H%s&}%s{\\p0}',
+    border or 1, color or 'FFFFFF', alpha or '00', table.concat(parts, ' '))
+end
+local function square(p, r)
+  return {
+    { x = p.x - r, y = p.y - r }, { x = p.x + r, y = p.y - r },
+    { x = p.x + r, y = p.y + r }, { x = p.x - r, y = p.y + r },
+  }
+end
+
+local function draw_base()
+  if not base.quad or base.playW <= 0 or base.playH <= 0 then
+    baseOverlay:remove()
+    return
+  end
+  local q = base.quad
+  local lines = { shape(q, 'FFFF00', '80', 2) } -- cyan base
+  if not base.edit then
+    local corner = math.max(4, base.playH * 0.011)
+    for _, p in ipairs(q) do
+      lines[#lines + 1] = shape(square(p, corner), '00FFFF', '20', 1)
+    end
+    local top = midpoint(q[1], q[2])
+    local rot = rotation_point()
+    lines[#lines + 1] = shape({ top, rot }, '0000FF', '60', 1)
+    lines[#lines + 1] = shape(square(rot, corner * 1.4), '0000FF', '20', 1)
+    for _, p in ipairs(base.anchors) do
+      lines[#lines + 1] = shape(square(p, corner), '00FF00', '20', 1)
+    end
+  end
+  baseOverlay.res_x = base.playW
+  baseOverlay.res_y = base.playH
+  baseOverlay.data = table.concat(lines, '\n')
+  baseOverlay:update()
+end
+
+local function update_base_edit(m)
+  local edit = base.edit
+  if not edit or not m then return end
+  local p = play_of(m)
+  if not p then return end
+  if edit.mode == 'create' then
+    local a = edit.startp
+    base.quad = {
+      { x = math.min(a.x, p.x), y = math.min(a.y, p.y) },
+      { x = math.max(a.x, p.x), y = math.min(a.y, p.y) },
+      { x = math.max(a.x, p.x), y = math.max(a.y, p.y) },
+      { x = math.min(a.x, p.x), y = math.max(a.y, p.y) },
+    }
+  elseif edit.mode == 'corner' then
+    base.quad[edit.corner] = p
+  elseif edit.mode == 'rotate' then
+    local a = angle_of(p, edit.center) - edit.startAngle
+    base.quad = {}
+    for i = 1, 4 do
+      base.quad[i] = rotate_point(edit.startQuad[i], edit.center, a)
+    end
+  end
+  draw_base()
+end
+
+local function start_base_edit(e)
+  if e.canceled then return end
+  if e.event == 'down' then
+    local m = mp.get_property_native('mouse-pos')
+    if not m or base.playW <= 0 or base.playH <= 0 then return end
+    mp.set_property_bool('pause', true)
+    local mode, corner
+    if base.quad then
+      if screen_dist(m, screen_of(rotation_point())) <= 22 then
+        mode = 'rotate'
+      else
+        for i, p in ipairs(base.quad) do
+          if screen_dist(m, screen_of(p)) <= 18 then
+            mode = 'corner'
+            corner = i
+            break
+          end
+        end
+      end
+    end
+    if mode then
+      base.edit = {
+        mode = mode,
+        corner = corner,
+        center = quad_center(base.quad),
+        startQuad = copy_quad(base.quad),
+        startAngle = angle_of(play_of(m), quad_center(base.quad)),
+      }
+    else
+      local p = play_of(m)
+      base.edit = { mode = 'create', startp = p }
+      base.quad = copy_quad({ p, p, p, p })
+    end
+    base.anchors = {}
+    draw_base()
+  elseif e.event == 'up' and base.edit then
+    local m = mp.get_property_native('mouse-pos')
+    if m then update_base_edit(m) end
+    local q = base.quad
+    if base.edit.mode == 'create' then
+      if (q[3].x - q[1].x) < 8 or (q[3].y - q[1].y) < 8 then
+        local p = base.edit.startp
+        local w, h = base.playW * 0.14, base.playH * 0.08
+        q = {
+          { x = p.x - w / 2, y = p.y - h / 2 }, { x = p.x + w / 2, y = p.y - h / 2 },
+          { x = p.x + w / 2, y = p.y + h / 2 }, { x = p.x - w / 2, y = p.y + h / 2 },
+        }
+        base.quad = q
+      end
+    end
+    base.edit = nil
+    send_base('quad', q[1].x, q[1].y, q[2].x, q[2].y, q[3].x, q[3].y, q[4].x, q[4].y)
+    draw_base()
+  end
+end
+
+mp.register_script_message('subsandwicher-set-base', function(playW, playH, ...)
+  local args = { ... }
+  base.playW = tonumber(playW) or 0
+  base.playH = tonumber(playH) or 0
+  base.quad = nil
+  base.anchors = {}
+  if #args >= 8 and base.playW > 0 and base.playH > 0 then
+    local q = {}
+    for i = 1, 8, 2 do
+      q[#q + 1] = { x = tonumber(args[i]) or 0, y = tonumber(args[i + 1]) or 0 }
+    end
+    base.quad = q
+    local idx = 9
+    while idx + 1 <= #args do
+      base.anchors[#base.anchors + 1] = { x = tonumber(args[idx]) or 0, y = tonumber(args[idx + 1]) or 0 }
+      idx = idx + 2
+    end
+  end
+  base.edit = nil
+  draw_base()
+end)
+
+mp.register_script_message('subsandwicher-clear-base', function()
+  base.quad = nil
+  base.anchors = {}
+  base.edit = nil
+  baseOverlay:remove()
+end)
 
 -- The app needs to know whether the click hit a subtitle. If it does, it sends
 -- back the PlayRes and one or more boxes to animate as a ghost.
@@ -169,6 +411,11 @@ local function bind(key, name, fn, opts)
 end
 
 bind('MOUSE_MOVE', 'subsandwicher-drag-move', function()
+  local m = mp.get_property_native('mouse-pos')
+  if base.edit then
+    update_base_edit(m)
+    return
+  end
   if not drag.active then return end
   update_drag()
   send('move', 0, 0, mp.get_property_number('time-pos'), drag.dx, drag.dy)
@@ -177,6 +424,18 @@ end)
 bind('MBTN_LEFT', 'subsandwicher-drag-normal', begin_drag('normal'), { complex = true })
 bind('Shift+MBTN_LEFT', 'subsandwicher-drag-axis', begin_drag('axis'), { complex = true })
 bind('Alt+MBTN_LEFT', 'subsandwicher-drag-fine', begin_drag('fine'), { complex = true })
+bind('Ctrl+MBTN_LEFT', 'subsandwicher-base-edit', start_base_edit, { complex = true })
+-- Double clicks are handled by our own normal click; silence mpv's missing
+-- MBTN_LEFT_DBL warning when default bindings are disabled.
+bind('MBTN_LEFT_DBL', 'subsandwicher-drag-double', function() end)
+
+bind('B', 'subsandwicher-base-clear', function()
+  base.quad = nil
+  base.anchors = {}
+  base.edit = nil
+  baseOverlay:remove()
+  send_base('clear')
+end)
 
 bind('ESC', 'subsandwicher-drag-cancel', function()
   overlay:remove()
@@ -207,4 +466,5 @@ end
 
 mp.register_event('shutdown', function()
   overlay:remove()
+  baseOverlay:remove()
 end)

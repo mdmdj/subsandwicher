@@ -241,6 +241,16 @@ shape" rather than "how many log lines".
 `conflicts[].events` and `windows[].events` are event IDs (`events[].id`), not
 array indices, although they currently coincide.
 
+## Resolution normalization
+
+Merge now upscales the primary PlayRes to the video height (capped at 1080p)
+when the subtitle script is smaller. A 640x360 script on a 1080p video becomes
+1920x1080 (x3). Style metrics, dialogue margins, inline positions/moves/sizes/
+borders and drawing coordinates scale together; percentages, angles, colours
+and timings do not. This makes preview dragging approximately one video pixel
+per script pixel instead of quantising one script pixel to three video pixels.
+Scanning an existing file with `report` never rewrites its PlayRes.
+
 ## Placement candidates
 
 Suggestions are deterministic candidates, not applied changes.
@@ -475,7 +485,7 @@ The review log is `kind: "subsandwicher.review-session"` with `app`, `video`,
 `mergedAss`, `finalAss`, `reportPath`, the chosen `fixes` (with the suggestion
 that was applied, plus any manual `override` and `comment`), `applied` (what
 the Go core changed, including the override and comment), `comments`,
-`statuses`, and the full `report` including raw `Dialogue:` lines. If the log cannot be written the
+`statuses`, referent `bases`, and the full `report` including raw `Dialogue:` lines. If the log cannot be written the
 subtitles are still saved and the UI reports the log error.
 
 ## Estimate-only baseline numbers

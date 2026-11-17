@@ -202,3 +202,32 @@ func TestParseTimeCS(t *testing.T) {
 		}
 	}
 }
+
+func TestScaleDocToVideoResolution(t *testing.T) {
+	doc := parseASS([]byte(assSource("PlayResX: 640\nPlayResY: 360\n",
+		"Style: sign,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,2,0,1,2,0,2,10,20,30,1\n",
+		"Dialogue: 0,0:00:01.00,0:00:02.00,sign,,10,20,30,,{\\pos(320,330)\\fs20\\bord2\\fad(1,2)}hello\n")))
+	scaleDoc(doc, 3)
+	if got := doc.Info["playresx"]; got != "1920" {
+		t.Errorf("PlayResX = %q", got)
+	}
+	if got := doc.Info["playresy"]; got != "1080" {
+		t.Errorf("PlayResY = %q", got)
+	}
+	st := doc.Styles[0]
+	if st.Val["fontsize"] != "60" || st.Val["outline"] != "6" || st.Val["marginv"] != "90" || st.Val["spacing"] != "6" {
+		t.Errorf("style not scaled: %+v", st.Val)
+	}
+	d := doc.Dialogues[0]
+	if d.MarginL != "30" || d.MarginR != "60" || d.MarginV != "90" {
+		t.Errorf("margins = %s,%s,%s", d.MarginL, d.MarginR, d.MarginV)
+	}
+	want := `{\pos(960,990)\fs60\bord6\fad(1,2)}hello`
+	if d.Text != want {
+		t.Errorf("text = %q, want %q", d.Text, want)
+	}
+	joined := strings.Join(doc.InfoRaw, "\n")
+	if !strings.Contains(joined, "PlayResX: 1920") || !strings.Contains(joined, "PlayResY: 1080") {
+		t.Errorf("InfoRaw not updated:\n%s", joined)
+	}
+}

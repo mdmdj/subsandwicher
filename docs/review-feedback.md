@@ -106,3 +106,21 @@ Session output: `[Trix] FX Fighter Kurumi-chan S01E01 ...vie-eng.review.json`
   subtitle boxes for single-event drags.
 - Animated events are hit-tested with their exact ink box at the paused event
   seek. Dragging a moving event translates the whole `\move` path.
+
+## E02 review — referent bases and resolution (2026-11-16)
+
+- 15 of 27 fixes were manual overrides; 12 of those set an absolute position,
+  not a delta. Comments repeatedly asked for "near/aligned with the translated
+  element" (windows 7, 10, 13–16, 19, 20, 22, 23). The missing capability was a
+  referent-aware placement, not more arbitrary nudge steps.
+- Added a Ctrl+drag referent base with nine clickable anchors, corner editing
+  for perspective and a rotation handle. Bases are saved in the review session.
+- Both `top` fixes were applied to **dialogue**, to keep it above a sign.
+- Merge now upscales low-PlayRes scripts to the video (capped at 1080p). The
+  E02 script was 640x360 on a 1080p video, so dragging was quantised to ~3 video
+  pixels; the upscaled 1920x1080 version renders identically apart from
+  anti-aliasing but offers 1:1 positioning.
+- The final rescan still had four fixed windows with conflicts (2, 3, 7, 12).
+  Window 12 was a dialogue-dialogue conflict where the user moved a sign; the
+  window groups several pair types. The estimated recheck now makes this
+  visible.

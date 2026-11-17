@@ -133,10 +133,24 @@ You can also click/drag in the mpv preview: mousedown pauses and picks the
 topmost subtitle under the cursor, a translucent ghost shows the target, and
 release commits the move through the same override path. Shift locks the
 dominant axis, Alt moves at quarter speed, and arrow keys nudge the selected
-event (Shift+arrows move 10 px); `R` resets the selected event to its original. Drags snap to the frame, the 5% safe area, and (for single events) other visible subtitle boxes.
-Animated subtitles translate their whole `\move` path; hit-testing for them
-uses the paused event seek and its exact ink box, so pause at the event's seek
-before dragging.
+event (Shift+arrows move 10 px); `R` resets the selected event to its original.
+Drags snap to the frame, the 5% safe area, and (for single events) other visible
+subtitle boxes. Snap distance is measured in screen pixels, not PlayRes units,
+so it stays consistent when the subtitle script is smaller than the video.
+
+Animated subtitles translate their whole `\move` path. The exact ink box is
+translated along the parsed move path, so a moving event can be picked and
+dragged at any paused frame inside its lifetime, not only at its conflict seek.
+
+**Referent base:** select a subtitle, then Ctrl+drag in the preview to mark the
+in-video text/object it is translating. Ctrl+drag a corner to make the quad
+perspective, or Ctrl+drag the red handle to rotate it. The app draws nine green
+anchor points around the base (above, corners, left/right, below, centre);
+clicking one places the selected subtitle there using its current box size and
+alignment; the review pane also shows the same anchors as arrow buttons. If no
+subtitle is selected, the base becomes pending until you click one. `B` or
+**Clear base** removes it. Base quads are saved in the review
+session log as `bases`.
 
 After applying, the app warns about fixes that
 leave the safe area/frame and shows an estimated re-check of conflicts still
