@@ -708,6 +708,25 @@ func buildWindows(conflicts []Conflict, events []*plannedEvent, playW, playH flo
 	for _, e := range events {
 		byID[e.order] = e
 	}
+	// A review window runs for the full visible lifetime of every event that
+	// participates in its conflicts, not just the overlap interval.
+	for i := range windows {
+		w := &windows[i]
+		start, end := w.Start, w.End
+		for _, id := range w.Events {
+			ev := byID[id]
+			if ev == nil {
+				continue
+			}
+			if ev.startSec < start {
+				start = ev.startSec
+			}
+			if ev.endSec > end {
+				end = ev.endSec
+			}
+		}
+		w.Start, w.End = start, end
+	}
 	cmap := map[int]Conflict{}
 	for _, c := range conflicts {
 		cmap[c.ID] = c

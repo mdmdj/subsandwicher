@@ -102,6 +102,84 @@ func TestApplyNudgeMovesRotationOrigin(t *testing.T) {
 	}
 }
 
+func TestIsolateLayersGivesUniqueLayers(t *testing.T) {
+	doc := &ASSDoc{Dialogues: []*Dialogue{
+		{Layer: "0", Text: "a"},
+		{Layer: "0", Text: "b"},
+		{Layer: "0", Text: "c"},
+	}}
+	isolateLayers(doc, map[int]bool{1: true})
+	got := doc.Dialogues[1].Layer
+	if got == "0" {
+		t.Fatalf("isolated event kept a used layer: %+v", doc.Dialogues[1])
+	}
+	for i, d := range doc.Dialogues {
+		if i != 1 && d.Layer == got {
+			t.Fatalf("isolated layer %q shared with event %d", got, i)
+		}
+	}
+}
+
+func TestIsolateLayersKeepsOwnEventsDistinct(t *testing.T) {
+	doc := &ASSDoc{Dialogues: []*Dialogue{
+		{Layer: "0", Text: "a"},
+		{Layer: "0", Text: "b"},
+		{Layer: "0", Text: "c"},
+	}}
+	isolateLayers(doc, map[int]bool{0: true, 2: true})
+	seen := map[string]bool{}
+	for _, d := range doc.Dialogues {
+		if seen[d.Layer] {
+			t.Fatalf("duplicate layer %q: %+v", d.Layer, doc.Dialogues)
+		}
+		seen[d.Layer] = true
+	}
+}
+
+func TestApplyExplicitLayerOverride(t *testing.T) {
+	assPath, reportPath, rep := writeMergedFixture(t)
+	w := rep.Windows[0]
+	layer := 9
+	out := filepath.Join(t.TempDir(), "out.ass")
+	if _, err := ApplyFixes(assPath, reportPath, out, []Fix{{
+		WindowID: w.ID, SuggestionIndex: 0,
+		Override: &FixOverride{Layer: &layer},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := parseASSFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := w.Suggestions[0].Event
+	if got := doc.Dialogues[ev].Layer; got != "9" {
+		t.Fatalf("layer = %q, want 9", got)
+	}
+}
+
+func TestApplyOwnLayerGetsUnusedLayer(t *testing.T) {
+	assPath, reportPath, rep := writeMergedFixture(t)
+	w := rep.Windows[0]
+	ev := w.Suggestions[0].Event
+	out := filepath.Join(t.TempDir(), "out.ass")
+	if _, err := ApplyFixes(assPath, reportPath, out, []Fix{{
+		WindowID: w.ID, SuggestionIndex: 0,
+		Override: &FixOverride{OwnLayer: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := parseASSFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := doc.Dialogues[ev].Layer
+	for i, d := range doc.Dialogues {
+		if i != ev && d.Layer == got {
+			t.Fatalf("own layer %q shared with event %d", got, i)
+		}
+	}
+}
+
 func TestApplyMoveTranslatesRotationOrigin(t *testing.T) {
 	st := geomStyle()
 	d := &Dialogue{Text: `{\org(100,100)\move(200,200,300,250)}hi`, Style: "Default"}

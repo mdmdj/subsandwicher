@@ -122,3 +122,12 @@ origin and appear to jump.
 Known limits: per-glyph inline transforms are still estimated, and `\frx`/
 `\fry` perspective uses libass's camera-distance approximation rather than a
 full glyph render when no exact mask exists.
+
+## Layers and collision
+
+Same-layer, non-positioned events are stacked by libass; that stacking order can
+differ between libass builds. The review UI therefore exposes the effective
+layer, Top/Back, layer up/down, an **own** isolation flag, and a collision badge
+(`fixed`, `possible`, `likely`, `definite`). Own-layer events are given
+the nearest unused layer at apply time, preserving their relative order. Use
+**Split layers** to give a group of events exclusive layers.

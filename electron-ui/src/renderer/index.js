@@ -13,6 +13,7 @@ let state = {
   mergeProgress: -1,
   chosen: {}, // window id -> { event id -> suggestion id }
   edits: {}, // "window:event" -> { suggestionId, override, dirty } manual fix edits
+  layerEdits: {}, // "window:event" -> { layer, ownLayer } layer/isolation edits
   groupSel: {}, // window id -> { event id -> true } selection for group move
   selected: null, // { windowId, eventId } picked in the mpv preview
   drag: null, // active preview drag state
@@ -211,6 +212,7 @@ function resetToLoad(message = '') {
   state.notes = {};
   state.chosen = {};
   state.edits = {};
+  state.layerEdits = {};
   state.groupSel = {};
   state.fixWarnings = {};
   state.recheck = [];
@@ -273,6 +275,7 @@ async function loadVideo(p) {
     state.notes = {};
     state.chosen = {};
     state.edits = {};
+    state.layerEdits = {};
     state.groupSel = {};
     state.fixWarnings = {};
     state.recheck = [];
@@ -465,6 +468,7 @@ async function eject() {
   state.notes = {};
   state.chosen = {};
   state.edits = {};
+  state.layerEdits = {};
   state.groupSel = {};
   state.fixWarnings = {};
   state.recheck = [];
@@ -525,6 +529,7 @@ btnPreview.addEventListener('click', async () => {
     state.notes = {};
     state.chosen = {};
     state.edits = {};
+    state.layerEdits = {};
     state.groupSel = {};
     state.fixWarnings = {};
     state.recheck = [];
@@ -798,10 +803,17 @@ function chosenFixes() {
   for (const [windowId, byEvent] of Object.entries(state.chosen)) {
     for (const [eventId, suggestionId] of Object.entries(byEvent || {})) {
       if (!Number.isInteger(suggestionId) || suggestionId < 0) continue;
+      const key = `${windowId}:${eventId}`;
       const fix = { windowId: Number(windowId), suggestionIndex: suggestionId };
-      const edit = state.edits[`${windowId}:${eventId}`];
+      const edit = state.edits[key];
       if (edit && edit.dirty && edit.suggestionId === suggestionId && edit.override) {
-        fix.override = edit.override;
+        fix.override = { ...edit.override };
+      }
+      const le = state.layerEdits[key];
+      if (le) {
+        fix.override = fix.override || {};
+        if (Number.isFinite(Number(le.layer))) fix.override.layer = Number(le.layer);
+        if (le.ownLayer) fix.override.ownLayer = true;
       }
       const note = state.notes[windowId];
       if (note) fix.comment = note;
@@ -869,6 +881,7 @@ function chooseFix(w, eventId, suggestionId) {
   if (suggestionId >= 0) byEvent[eventId] = suggestionId;
   else delete byEvent[eventId];
   delete state.edits[`${w.id}:${eventId}`];
+  if (suggestionId < 0) delete state.layerEdits[`${w.id}:${eventId}`];
   if (Object.keys(byEvent).length) state.chosen[w.id] = byEvent;
   else delete state.chosen[w.id];
   updateRowBadges(w.id);
@@ -1100,6 +1113,142 @@ function orderForSiblingMove(ids, suggestions, match) {
   return { ids: [matchId, ...ids.slice(0, i), ...ids.slice(i + 1)], matchId };
 }
 
+function eventLayerEdit(w, eventId) {
+  return state.layerEdits[`${w.id}:${eventId}`] || null;
+}
+
+function effectiveLayer(w, eventId, ev) {
+  const le = eventLayerEdit(w, eventId);
+  if (le && Number.isFinite(Number(le.layer))) return Number(le.layer);
+  return Number(ev && ev.layer) || 0;
+}
+
+function eventLayerEditAny(eventId) {
+  let found = null;
+  const suffix = `:${eventId}`;
+  for (const [key, le] of Object.entries(state.layerEdits)) {
+    if (key.endsWith(suffix)) found = le;
+  }
+  return found;
+}
+
+function allLayerBounds() {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const ev of (state.review?.events || [])) {
+    const le = eventLayerEditAny(ev.id);
+    const layer = le && Number.isFinite(Number(le.layer)) ? Number(le.layer) : Number(ev.layer) || 0;
+    if (layer < min) min = layer;
+    if (layer > max) max = layer;
+  }
+  if (!Number.isFinite(min)) min = 0;
+  if (!Number.isFinite(max)) max = 0;
+  return { min, max };
+}
+
+function ensureChosenCarrier(w, eventId) {
+  const chosen = state.chosen[w.id] || (state.chosen[w.id] = {});
+  if (Number.isInteger(chosen[eventId])) return true;
+  const g = (w.byEvent || []).find(x => x.event === eventId);
+  const ids = g && Array.isArray(g.suggestionIds)
+    ? g.suggestionIds
+    : (w.suggestions || []).map((s, i) => s && s.event === eventId ? i : -1).filter(i => i >= 0);
+  let id = ids.find(i => w.suggestions[i] && w.suggestions[i].kind === 'top');
+  if (id === undefined) id = ids.find(i => w.suggestions[i] && w.suggestions[i].kind !== 'hide');
+  if (id === undefined) return false;
+  chosen[eventId] = id;
+  return true;
+}
+
+function setLayerEdit(w, eventId, patch) {
+  if (!ensureChosenCarrier(w, eventId)) {
+    setStatus(`#${eventId}: no fix candidate can carry a layer change`, true);
+    return;
+  }
+  const key = editKey(w, eventId);
+  const cur = { ...(state.layerEdits[key] || {}) };
+  Object.assign(cur, patch || {});
+  if (cur.layer !== undefined && cur.layer !== null) cur.layer = Number(cur.layer);
+  if (!Number.isFinite(cur.layer)) delete cur.layer;
+  if (!cur.ownLayer) delete cur.ownLayer;
+  if (cur.layer === undefined && !cur.ownLayer) delete state.layerEdits[key];
+  else state.layerEdits[key] = cur;
+  const scroll = windowDetail.scrollTop;
+  renderWindowDetail(w);
+  windowDetail.scrollTop = scroll;
+  state.windowScroll[w.id] = scroll;
+  applyPreviewTo(state.pausedWindow === w.id ? null : eventSeek(w, eventId));
+  const ev = reviewEvents().get(eventId);
+  setStatus(`#${eventId}: layer ${effectiveLayer(w, eventId, ev)}${cur.ownLayer ? ', own layer' : ''}`);
+}
+
+function collisionEligible(ev) {
+  const raw = String((ev && ev.raw) || '');
+  if (/\\pos\s*\(/.test(raw) || /\\move\s*\(/.test(raw) ||
+      /\\org\s*\(/.test(raw) || /\\t\s*\(/.test(raw)) return false;
+  if (/^(banner|scroll\s+(up|down))/i.test(String((ev && ev.effect) || '').trim())) return false;
+  return true;
+}
+
+function boxesOverlap(a, b) {
+  if (!a || !b) return false;
+  return a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+}
+
+// Best-guess collision state for the event header:
+// fixed/own -> cannot be pushed; possible -> eligible but no same-layer peer
+// overlaps in time; likely -> a peer is active concurrently; definite -> their
+// estimated lifetime boxes also intersect.
+function collisionState(w, ev) {
+  if (!ev) return { level: 'fixed', label: 'fixed', title: 'no event data' };
+  const le = eventLayerEdit(w, ev.id);
+  if (le && le.ownLayer) {
+    return { level: 'own', label: 'own layer', title: 'This event is kept on a layer no other event uses.' };
+  }
+  if (!collisionEligible(ev)) {
+    return {
+      level: 'fixed', label: 'fixed',
+      title: 'Explicit position/move/org, an animated \\t, or a Banner/Scroll effect disables collision.',
+    };
+  }
+  const layer = effectiveLayer(w, ev.id, ev);
+  const map = reviewEvents();
+  let timePeer = false;
+  let boxPeer = false;
+  for (const id of windowEventIds(w)) {
+    if (id === ev.id) continue;
+    const peer = map.get(id);
+    if (!peer) continue;
+    if (Math.max(ev.start, peer.start) >= Math.min(ev.end, peer.end)) continue;
+    if (effectiveLayer(w, id, peer) !== layer) continue;
+    const peerEdit = eventLayerEdit(w, id);
+    if (peerEdit && peerEdit.ownLayer) continue;
+    timePeer = true;
+    if (boxesOverlap(ev.bbox, peer.bbox)) { boxPeer = true; break; }
+  }
+  if (boxPeer) {
+    return {
+      level: 'definite', label: 'definite',
+      title: 'Another event on the same layer is active at the same time and their lifetime boxes intersect.',
+    };
+  }
+  if (timePeer) {
+    return {
+      level: 'likely', label: 'likely',
+      title: 'Another event on the same layer is active at the same time; boxes may overlap at some frames.',
+    };
+  }
+  return {
+    level: 'possible', label: 'possible',
+    title: 'Collision-eligible, but no other event on this layer is active at the same time.',
+  };
+}
+
+function collisionBadge(w, ev) {
+  const c = collisionState(w, ev);
+  return `<span class="collision-badge ${c.level}" title="${escapeHtml(c.title)}">${escapeHtml(c.label)}</span>`;
+}
+
 function renderWindowDetail(w) {
   windowEmpty.classList.add('hidden');
   windowContent.classList.remove('hidden');
@@ -1126,9 +1275,24 @@ function renderWindowDetail(w) {
     '<label>dx <input class="group-dx" type="number" step="1" value="0"></label>' +
     '<label>dy <input class="group-dy" type="number" step="1" value="0"></label>' +
     '<button type="button" class="small group-apply" disabled>Move selected</button>' +
+    '<label class="group-style">style <select class="group-style-select"><option value="">all styles</option></select></label>' +
+    '<button type="button" class="small group-split" title="Give each selected/style event its own new layer so they cannot collide">Split layers</button>' +
     '<button type="button" class="small minor group-clear" disabled>Clear selection</button>' +
     '<button type="button" class="small minor base-clear" disabled>Clear base</button>' +
-    '<span class="sug-sub">Tick one or more event headings, then move them together.</span>';
+    '<span class="sug-sub">Tick one or more event headings, then move them together. Split layers uses ticked events, or every event of the chosen style when nothing is ticked.</span>';
+  const styleSel = groupBar.querySelector('.group-style-select');
+  const styles = new Set();
+  for (const id of windowEventIds(w)) {
+    const ev = byId.get(id);
+    if (ev && ev.style) styles.add(ev.style);
+  }
+  for (const s of [...styles].sort()) {
+    const opt = document.createElement('option');
+    opt.value = s;
+    opt.textContent = s;
+    styleSel.appendChild(opt);
+  }
+  groupBar.querySelector('.group-split').addEventListener('click', () => splitGroupLayers(w, groupBar));
   groupBar.querySelector('.group-apply').addEventListener('click', () => {
     const dx = Number(groupBar.querySelector('.group-dx').value) || 0;
     const dy = Number(groupBar.querySelector('.group-dy').value) || 0;
@@ -1165,7 +1329,6 @@ function renderWindowDetail(w) {
   }
   for (const g of groups) {
     const ev = byId.get(g.event);
-    const topId = g.ids.find(id => suggestions[id] && suggestions[id].kind === 'top');
     const wrap = document.createElement('div');
     wrap.className = 'event-fixes';
     wrap.dataset.event = String(g.event);
@@ -1177,10 +1340,22 @@ function renderWindowDetail(w) {
     head.className = 'fix-event-head';
     const seekTxt = Number.isFinite(g.seek) ? ` · ${fmtClock(g.seek)}` : '';
     const title = ev ? (ev.text || `Event #${g.event}`) : `Event #${g.event}`;
+    const le = eventLayerEdit(w, g.event);
+    const layer = effectiveLayer(w, g.event, ev);
+    const own = !!(le && le.ownLayer);
+    const layerLabel = own && !(le && Number.isFinite(Number(le.layer))) ? 'L*' : `L${layer}`;
     head.innerHTML =
       `<div class="fix-event-title">${escapeHtml(title)}</div>` +
-      `<div class="fix-event-sub">#${g.event} ${ev ? escapeHtml(ev.role) : ''}${escapeHtml(seekTxt)} ${swatchesFor(ev)}` +
-      `${topId !== undefined ? ' <span class="toolbar-spacer"></span>' : ''}</div>`;
+      `<div class="fix-event-sub">#${g.event} ${ev ? escapeHtml(ev.role) : ''}${escapeHtml(seekTxt)} ${swatchesFor(ev)} ` +
+      `${collisionBadge(w, ev)} ` +
+      '<span class="layer-tools">' +
+      `<span class="layer-index" title="Effective ASS layer${own ? ' (own layer assigned at apply)' : ''}">${layerLabel}</span>` +
+      '<button type="button" class="small minor layer-btn" data-layer="top" title="Move to a new highest layer">Top</button>' +
+      '<button type="button" class="small minor layer-btn" data-layer="up" title="One layer up">↑</button>' +
+      '<button type="button" class="small minor layer-btn" data-layer="down" title="One layer down">↓</button>' +
+      '<button type="button" class="small minor layer-btn" data-layer="back" title="Move to a new lowest layer">Back</button>' +
+      `<label class="own-layer" title="Give this event a layer no other event uses, so nothing can push it"><input type="checkbox" ${own ? 'checked' : ''}> own</label>` +
+      '</span></div>';
     const pick = document.createElement('label');
     pick.className = 'group-pick';
     pick.title = 'Select this event for a shared group move';
@@ -1196,16 +1371,19 @@ function renderWindowDetail(w) {
     });
     pick.appendChild(pickBox);
     head.querySelector('.fix-event-sub').prepend(pick);
-    if (topId !== undefined) {
-      const topBtn = document.createElement('button');
-      const topChosen = chosenForWindow[g.event] === topId;
-      topBtn.type = 'button';
-      topBtn.className = 'small minor move-top-btn' + (topChosen ? ' active' : '');
-      topBtn.textContent = topChosen ? 'On top ✓' : 'Move to top';
-      topBtn.title = 'Draw this event above every other subtitle';
-      topBtn.addEventListener('click', () => chooseFix(w, g.event, topChosen ? -1 : topId));
-      head.querySelector('.fix-event-sub').appendChild(topBtn);
-    }
+    head.querySelectorAll('[data-layer]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const cur = effectiveLayer(w, g.event, ev);
+        const bounds = allLayerBounds();
+        const act = btn.dataset.layer;
+        const next = act === 'top' ? bounds.max + 1
+          : act === 'back' ? bounds.min - 1
+            : act === 'up' ? cur + 1 : cur - 1;
+        setLayerEdit(w, g.event, { layer: next });
+      });
+    });
+    const ownBox = head.querySelector('.own-layer input');
+    if (ownBox) ownBox.addEventListener('change', () => setLayerEdit(w, g.event, { ownLayer: ownBox.checked }));
     wrap.appendChild(head);
     wrap.insertAdjacentHTML('beforeend', eventDetailsHtml(ev));
     const warn = state.fixWarnings[`${w.id}:${g.event}`];
@@ -1587,6 +1765,46 @@ function moveEventsBy(w, eventIds, dx, dy, opts = {}) {
 function applyGroupMove(w, dx, dy) {
   const events = Object.keys(state.groupSel[w.id] || {}).map(Number);
   moveEventsBy(w, events, dx, dy, { source: 'group' });
+}
+
+function splitGroupLayers(w, groupBar) {
+  const picked = Object.keys(state.groupSel[w.id] || {}).map(Number);
+  const style = groupBar.querySelector('.group-style-select').value;
+  let targets = picked.length ? picked : [...windowEventIds(w)];
+  if (style) {
+    const map = reviewEvents();
+    targets = targets.filter(id => {
+      const ev = map.get(id);
+      return ev && ev.style === style;
+    });
+  }
+  targets = [...new Set(targets)];
+  if (!targets.length) {
+    setStatus('split layers: no matching events', true);
+    return;
+  }
+  const map = reviewEvents();
+  targets.sort((a, b) => {
+    const ea = map.get(a);
+    const eb = map.get(b);
+    const la = effectiveLayer(w, a, ea);
+    const lb = effectiveLayer(w, b, eb);
+    return la !== lb ? la - lb : a - b;
+  });
+  let next = allLayerBounds().max + 1;
+  let changed = 0;
+  for (const id of targets) {
+    if (!ensureChosenCarrier(w, id)) continue;
+    const key = editKey(w, id);
+    state.layerEdits[key] = { ...(state.layerEdits[key] || {}), layer: next++ };
+    changed++;
+  }
+  const scroll = windowDetail.scrollTop;
+  renderWindowDetail(w);
+  windowDetail.scrollTop = scroll;
+  state.windowScroll[w.id] = scroll;
+  applyPreviewTo(state.pausedWindow === w.id ? null : eventSeek(w, targets[0]));
+  setStatus(`split layers: ${changed} event(s) got exclusive layers`);
 }
 
 function previewPlayRes() {
@@ -2656,6 +2874,7 @@ function basePayload() {
     comments: { ...state.notes },
     statuses: { ...state.statuses },
     bases: state.bases,
+    layerEdits: state.layerEdits,
     pendingBase: state.pendingBase,
     recheck: state.recheck,
     fixWarnings: state.fixWarnings,

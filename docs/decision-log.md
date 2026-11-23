@@ -82,7 +82,9 @@ Policy, in order:
   scaling) are `auto`.
 
 Only `review` and `required` conflicts create windows. Edge conflicts stay in
-the conflict list so they can be listed separately.
+the conflict list so they can be listed separately. A window's `start`/`end`
+span the full visible lifetime of its conflict events, not only the overlap
+interval, so all related events can be reviewed.
 
 ## Decision rules
 
@@ -406,6 +408,18 @@ The **Review conflicts** panel:
   styles and includes non-conflicting active events.
 - **Move to top** in each event heading sets the event's layer above every
   other subtitle without changing its position.
+- **Layer controls:** the event heading shows the effective layer (`L<n>`),
+  Top/Back create a new highest/lowest layer, and up/down step one layer without
+  making it exclusive. **own** gives the event a layer no other event uses, so
+  nothing can push it around. The collision badge is a best guess derived from
+  the event's tags/Effect and same-layer peers (`fixed`, `possible`,
+  `likely`, `definite`, `own layer`).
+- **Split layers** in the group bar puts ticked events, or every event of the
+  selected style when nothing is ticked, on exclusive new layers.
+- Manual layer/isolation edits are carried as `override.layer` and
+  `override.ownLayer` in the fix payload. Isolation is resolved after all other
+  edits; each isolated event gets the nearest unused layer at or above its
+  current layer, preserving relative order.
 - **Preview drag:** clicking the mpv window pauses it and selects the topmost
   subtitle under the cursor. Dragging shows a translucent ghost and commits the
   override on release (Shift locks an axis, Alt is quarter-speed, arrow keys

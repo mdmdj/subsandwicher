@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -32,6 +33,10 @@ type FixOverride struct {
 	Dy        *float64 `json:"dy,omitempty"`
 	FontScale *float64 `json:"fontScale,omitempty"`
 	At        *Point   `json:"at,omitempty"`
+	// Layer overrides the event's layer. OwnLayer gives the event a unique
+	// layer after all other edits, so no other event can push it around.
+	Layer    *int `json:"layer,omitempty"`
+	OwnLayer bool `json:"ownLayer,omitempty"`
 }
 
 // AppliedFix describes what a fix did.
@@ -113,6 +118,7 @@ func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult,
 	if playW <= 0 || playH <= 0 {
 		playW, playH = playRes(doc)
 	}
+	ownLayer := map[int]bool{}
 	for _, fix := range fixes {
 		if fix.SuggestionIndex < 0 {
 			continue
@@ -160,11 +166,22 @@ func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult,
 		default:
 			return nil, fmt.Errorf("window %d suggestion %d has unknown kind %q", fix.WindowID, fix.SuggestionIndex, s.Kind)
 		}
+		if fix.Override != nil {
+			if fix.Override.Layer != nil {
+				d.Layer = strconv.Itoa(*fix.Override.Layer)
+			}
+			if fix.Override.OwnLayer {
+				ownLayer[s.Event] = true
+			}
+		}
 		res.Applied = append(res.Applied, AppliedFix{
 			WindowID: fix.WindowID, SuggestionIndex: fix.SuggestionIndex, Event: s.Event,
 			Kind: s.Kind, Before: before, After: d.Text, Reason: s.Reason,
 			Override: fix.Override, Comment: fix.Comment,
 		})
+	}
+	if len(ownLayer) > 0 {
+		isolateLayers(doc, ownLayer)
 	}
 	if len(res.Applied) == 0 {
 		// Everything was "original"; keep the file byte-identical.
@@ -216,6 +233,40 @@ func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult,
 		return nil, err
 	}
 	return res, nil
+}
+
+// isolateLayers gives every marked event a layer not used by any other event.
+// Marked events keep their relative layer/order and are moved only as far as
+// needed, so a stack of isolated signs does not all jump above unrelated art.
+func isolateLayers(doc *ASSDoc, own map[int]bool) {
+	used := map[int]bool{}
+	for i, d := range doc.Dialogues {
+		if !own[i] {
+			used[atoiDefault(d.Layer, 0)] = true
+		}
+	}
+	ids := make([]int, 0, len(own))
+	for id := range own {
+		if id >= 0 && id < len(doc.Dialogues) {
+			ids = append(ids, id)
+		}
+	}
+	sort.SliceStable(ids, func(i, j int) bool {
+		li := atoiDefault(doc.Dialogues[ids[i]].Layer, 0)
+		lj := atoiDefault(doc.Dialogues[ids[j]].Layer, 0)
+		if li != lj {
+			return li < lj
+		}
+		return ids[i] < ids[j]
+	})
+	for _, id := range ids {
+		l := atoiDefault(doc.Dialogues[id].Layer, 0)
+		for used[l] {
+			l++
+		}
+		used[l] = true
+		doc.Dialogues[id].Layer = strconv.Itoa(l)
+	}
 }
 
 // applyPosition applies the optional positional part of a fix. Top/raise
