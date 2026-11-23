@@ -1937,19 +1937,45 @@ function hitTestPreviewEvent(w, nx, ny, time, screenW, screenH, liveById) {
     else if (chosenS && chosenS.kind === 'raise') layer += 1;
     const live = liveById ? liveById.get(id) : null;
     if (liveById && !live) continue;
-    const geom = live ? { box: live.box } : eventCurrentGeometry(hitWin, id, ev, time);
-    if (!geom) continue;
-    const b = geom.box;
-    const dx = x < b.x0 ? b.x0 - x : x > b.x1 ? x - b.x1 : 0;
-    const dy = y < b.y0 ? b.y0 - y : y > b.y1 ? y - b.y1 : 0;
-    const distPx = Math.hypot(dx / pxX, dy / pxY);
+    const solo = eventCurrentGeometry(hitWin, id, ev, time);
+    if (!live && !solo) continue;
+
+    const contains = (b) => b && x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1;
+    const distToBox = (b) => {
+      const dx = x < b.x0 ? b.x0 - x : x > b.x1 ? x - b.x1 : 0;
+      const dy = y < b.y0 ? b.y0 - y : y > b.y1 ? y - b.y1 : 0;
+      return Math.hypot(dx, dy);
+    };
+    let rep = null;
+    let distPx = 0;
+    if (live && contains(live.box)) {
+      // Live box is exact for this frame. If the click is in an empty corner,
+      // do not fall back to a stale solo box and select the wrong event.
+      if (!coverageHit(live.coverage, live.box, x, y)) continue;
+      rep = { box: live.box, source: 'live' };
+    } else if (solo && contains(solo.box) && coverageHit(eventCoverage(ev, time), solo.box, x, y) &&
+        (!live || distToBox(live.box) <= Math.max(80, (live.box.y1 - live.box.y0) * 2))) {
+      // The live collision stack may have moved this event away from where its
+      // own text is drawn. The solo box is the fallback for that case, but only
+      // when the live box is still nearby (not an old position after a fix).
+      rep = { box: solo.box, source: eventBoxSource(ev, time) };
+    } else {
+      const b = (live && live.box) || (solo && solo.box);
+      if (!b) continue;
+      const dx = x < b.x0 ? b.x0 - x : x > b.x1 ? x - b.x1 : 0;
+      const dy = y < b.y0 ? b.y0 - y : y > b.y1 ? y - b.y1 : 0;
+      distPx = Math.hypot(dx / pxX, dy / pxY);
+      if (distPx > grabPx) continue;
+      rep = { box: b, source: live ? 'live' : eventBoxSource(ev, time) };
+    }
+
+    const b = rep.box;
+    const area = Math.max(0, b.x1 - b.x0) * Math.max(0, b.y1 - b.y0);
     const inWin = hitWin.id === w.id;
-    const cov = live ? live.coverage : eventCoverage(ev, time);
-    const ink = distPx !== 0 || coverageHit(cov, b, x, y);
     const cand = {
-      eventId: id, windowId: hitWin.id, layer, inWin, box: b,
-      distPx: Math.round(distPx * 10) / 10, ink,
-      source: live ? 'live' : eventBoxSource(ev, time),
+      eventId: id, windowId: hitWin.id, layer, inWin, box: b, area,
+      distPx: Math.round(distPx * 10) / 10, ink: true,
+      source: rep.source,
       transform: transformLabel(ev) || undefined,
       moving: !!ev.moving,
       effect: ev.effect || undefined,
@@ -1957,19 +1983,17 @@ function hitTestPreviewEvent(w, nx, ny, time, screenW, screenH, liveById) {
       text: ev.text || undefined,
     };
     if (candidates.length < 40) candidates.push(cand);
-    // Inside the AABB but outside the ink (rotated corner or letter gap): do
-    // not claim the click for this event.
-    if (distPx === 0 && !ink) continue;
-    // ASS draw order is layer first, then file order (later wins). Window
-    // membership must not outrank stacking; we switch windows after a hit.
-    const winsTie = (cur) => layer !== cur.layer ? layer > cur.layer : id > cur.eventId;
+    // Layer remains the z-order. Within a layer, prefer the compact box: when
+    // libass stacks two signs differently in mpv and ffmpeg, the smaller box is
+    // the likely label under the pointer.
+    const winsTie = (cur) => layer !== cur.layer ? layer > cur.layer
+      : area !== cur.area ? area < cur.area
+      : id > cur.eventId;
     if (distPx === 0) {
-      if (!best || winsTie(best)) best = { ...cand, key: layer * 1000000 + id };
-    } else if (distPx <= grabPx) {
-      if (!nearest || distPx < nearest.distPx ||
-          (distPx === nearest.distPx && winsTie(nearest))) {
-        nearest = { ...cand, key: layer * 1000000 + id };
-      }
+      if (!best || winsTie(best)) best = { ...cand };
+    } else if (!nearest || distPx < nearest.distPx ||
+        (distPx === nearest.distPx && winsTie(nearest))) {
+      nearest = { ...cand };
     }
   }
   const hit = best || nearest;

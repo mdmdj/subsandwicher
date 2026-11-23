@@ -99,8 +99,10 @@ when available. Before a drag starts, the CLI `boxes` command re-renders the
 current preview frame and returns the real on-screen boxes: events are rendered
 together (so libass collision stacking matches mpv), other events are made
 transparent so only the target contributes ink, and fades/alpha and Effect-column
-motion are honored. This also fixes signs that share a style and are stacked
-vertically by libass but were rendered alone in the decision log. A coarse 16x8
+motion are honored. If a live box does not contain the click, the event's solo
+box is also considered when the live box is still nearby; within the same layer
+the smaller box wins. This handles libass builds that order equal-layer
+collision stacks differently. A coarse 16x8
 ink-coverage grid travels with each exact box, so clicking an empty corner of a
 rotated/skewed bounding box does not select it.
 `\t` animated transforms and Effect-column motion (`Banner`, `Scroll up`,
