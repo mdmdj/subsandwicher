@@ -22,7 +22,8 @@ Usage:
   subsandwicher apply --ass <merged.ass> --report <report.json> --out <out.ass> [--fix=<window>:<candidate> ...] [--fix-json=<fix object> ...]
   subsandwicher <video-file> <primary-lang> <secondary-lang>
 
-All arguments are named. "probe" prints subtitle streams as JSON. "merge"
+All arguments are named. "probe" prints subtitle streams as JSON, including
+external subtitle files detected beside the video. "merge"
 writes the merged file, a per-event decision log, and prints result statistics
 plus dialogue-line events as JSON. "report" scans an existing merged .ass and
 writes only the decision log. "apply" writes a copy of the merged file with

@@ -244,6 +244,7 @@ async function loadVideo(p) {
     const res = await S.probeVideo(p);
     const streams = res.streams || [];
     const usable = streams.filter(s => !s.bitmapped);
+    const externalCount = streams.filter(s => s.external).length;
     if (!usable.length) {
       await failToLoad(`No text subtitle tracks were found in "${String(p).split(/[\\/]/).pop()}".`);
       return;
@@ -283,7 +284,7 @@ async function loadVideo(p) {
     updatePlaybackButtons();
     dropstatus.textContent = '';
     try { await S.fitWindow(); } catch (e) { console.warn('fit-window failed', e); }
-    setStatus(`${streams.length} subtitle stream(s) found — pick primary and secondary, then "Continue".`);
+    setStatus(`${streams.length} subtitle stream(s) found${externalCount ? `, ${externalCount} external file(s)` : ''} — pick primary and secondary, then "Continue".`);
   } catch (e) {
     await failToLoad(friendlyProbeError(e, p));
   } finally {
@@ -308,17 +309,48 @@ const LANG_LABELS = {
   tha: 'Thai', tur: 'Turkish', vie: 'Vietnamese', zho: 'Chinese',
 };
 
+let langDisplay = null;
+try {
+  langDisplay = new Intl.DisplayNames(['en'], { type: 'language' });
+} catch (e) { /* older Electron */ }
+
 function langName(code) {
   const c = (code || '').toLowerCase();
-  return LANG_LABELS[c] || (c ? c : 'no tag');
+  if (!c) return 'no tag';
+  if (LANG_LABELS[c]) return LANG_LABELS[c];
+  if (langDisplay) {
+    try {
+      const name = langDisplay.of(c);
+      if (name && name !== c) return name;
+    } catch (e) { /* not a language tag */ }
+  }
+  return c;
+}
+
+function streamFile(s) {
+  if (!s) return '';
+  if (s.file_name) return s.file_name;
+  return String(s.path || '').split(/[\\/]/).pop() || 'external subtitle';
 }
 
 function streamLabel(s) {
   if (!s) return '';
   const lang = (s.tags && s.tags.language) || '';
+  if (s.external) {
+    const extra = (s.tags && s.tags.title) ? ` — ${s.tags.title}` : '';
+    return `${streamFile(s)} — ${langName(lang)}${extra} [external file]`;
+  }
   const title = (s.tags && s.tags.title) || 'untitled';
   const tag = s.bitmapped ? ' [image-based — not usable]' : '';
   return `#${s.index}  ${title} — ${langName(lang)}${tag}`;
+}
+
+function streamOptionLabel(s) {
+  if (s.external) {
+    const extra = (s.tags && s.tags.title) ? ` ${s.tags.title}` : '';
+    return `${streamFile(s)} — ${langName(s.tags?.language)}${extra}`;
+  }
+  return `#${s.index} ${(s.tags && s.tags.title) || 'untitled'} — ${langName(s.tags?.language)}`;
 }
 
 function buildStreamLists() {
@@ -329,8 +361,9 @@ function buildStreamLists() {
     for (const s of state.streams) {
       if (s.bitmapped) continue;
       const label = document.createElement('label');
+      if (s.external) label.classList.add('external');
       label.innerHTML = `<input type="radio" name="${role}" value="${s.index}"> ` +
-        `<span>#${s.index} ${escapeHtml((s.tags && s.tags.title) || 'untitled')} — ${escapeHtml(langName(s.tags?.language))}</span>`;
+        `<span>${escapeHtml(streamOptionLabel(s))}</span>`;
       const input = label.querySelector('input');
       input.addEventListener('change', () => {
         const wasBoth = bothChosen();

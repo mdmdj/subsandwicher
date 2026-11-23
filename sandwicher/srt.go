@@ -2,6 +2,7 @@ package sandwicher
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -14,12 +15,22 @@ import (
 // astisub's own SSA writer is not used because it drops SRT bold/italic/
 // underline/font styling.
 func srtToASSDoc(srtPath string) (*ASSDoc, error) {
-	f, err := os.Open(srtPath)
+	return astisubToASSDoc(srtPath, "SRT", astisub.ReadFromSRT)
+}
+
+// vttToASSDoc converts a WebVTT sidecar with the same inline styling support
+// as SRT.
+func vttToASSDoc(vttPath string) (*ASSDoc, error) {
+	return astisubToASSDoc(vttPath, "WebVTT", astisub.ReadFromWebVTT)
+}
+
+func astisubToASSDoc(path, source string, read func(io.Reader) (*astisub.Subtitles, error)) (*ASSDoc, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	sub, err := astisub.ReadFromSRT(f)
+	sub, err := read(f)
 	if err != nil {
 		return nil, err
 	}
@@ -28,7 +39,7 @@ func srtToASSDoc(srtPath string) (*ASSDoc, error) {
 		"playresx": "384", "playresy": "288",
 	}}
 	doc.InfoRaw = []string{
-		"; Converted from SRT by subsandwicher (parsing by go-astisub)",
+		"; Converted from " + source + " by subsandwicher (parsing by go-astisub)",
 		"ScriptType: v4.00+",
 		"PlayResX: 384",
 		"PlayResY: 288",
@@ -94,9 +105,9 @@ func srtItemTags(sa *astisub.StyleAttributes) (open, close string) {
 		o.WriteString(`{\` + tag + `1}`)
 		c.WriteString(`{\` + tag + `0}`)
 	}
-	add(sa.SRTBold, "b")
-	add(sa.SRTItalics, "i")
-	add(sa.SRTUnderline, "u")
+	add(sa.SRTBold || sa.WebVTTBold, "b")
+	add(sa.SRTItalics || sa.WebVTTItalics, "i")
+	add(sa.SRTUnderline || sa.WebVTTUnderline, "u")
 	if sa.SRTColor != nil {
 		o.WriteString(fmt.Sprintf(`{\c&H%02X%02X%02X&}`, sa.SRTColor.Blue, sa.SRTColor.Green, sa.SRTColor.Red))
 		c.WriteString(`{\c}`)

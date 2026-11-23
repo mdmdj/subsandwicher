@@ -13,6 +13,13 @@ text subtitle stream, labeled from mkv tags. Image-based streams
 (PGS / VobSub / DVB) are filtered out — the Go core refuses them too
 ("image-based ... out of scope"), they only ever show up as hints.
 
+The probe also finds external subtitle files beside the video (same base name,
+e.g. `Film.en.srt`, `Film.English.forced.srt`, or under `Subs/`) and offers
+`.srt`, `.ass`, `.ssa` and `.vtt` sidecars in the same pickers. Their language
+comes from the filename; qualifiers such as `forced`/`SDH` become the title.
+The merge reads the chosen file directly instead of extracting an embedded
+stream.
+
 When the language form picks a track automatically, titles are scored:
 full/dialogue/main/complete are preferred, signs/forced/SDH/CC are
 deprioritized. This matters in shows where the "English" stream list is

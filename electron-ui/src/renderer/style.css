@@ -35,6 +35,11 @@ body {
 }
 .streamlist label:hover { background: rgba(255,255,255,0.06); }
 .streamlist label.checked { background: rgba(120,120,220,0.15); border-color: #88a; }
+.streamlist label.external span::after {
+  content: " · external file";
+  color: #8a9;
+  font-size: 12px;
+}
 .streamlist input { margin-right: 8px; }
 button {
   font-size: 15px;

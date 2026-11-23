@@ -42,12 +42,16 @@ var bitmapSubCodecs = map[string]bool{
 	"arib_caption":      true,
 }
 
-// Stream is one subtitle stream as reported by ffprobe.
+// Stream is one selectable subtitle track: an ffprobe stream from the
+// container, or an external subtitle file found next to the video.
 type Stream struct {
-	Index     int               `json:"index"`
+	Index     int               `json:"index"` // ffprobe index, or a synthetic index for external files
 	CodecName string            `json:"codec_name,omitempty"`
 	CodecType string            `json:"codec_type,omitempty"`
 	Tags      map[string]string `json:"tags,omitempty"`
+	External  bool              `json:"external,omitempty"`
+	Path      string            `json:"path,omitempty"`
+	FileName  string            `json:"file_name,omitempty"`
 }
 
 // Progress is one loading step. Overall is the weighted fraction of the whole
@@ -152,7 +156,7 @@ func extOf() string {
 }
 
 // ProbeSubtitleStreams runs ffprobe on the video and returns its text+bitmap
-// subtitle streams.
+// subtitle streams, followed by any external subtitle files found next to it.
 func ProbeSubtitleStreams(video string) ([]Stream, error) {
 	out, err := exec.Command(resolveBin("ffprobe"), "-v", "error", "-print_format", "json",
 		"-show_streams", "-select_streams", "s", video).Output()
@@ -171,6 +175,7 @@ func ProbeSubtitleStreams(video string) ([]Stream, error) {
 			subs = append(subs, s)
 		}
 	}
+	subs = append(subs, detectExternalSubtitles(video)...)
 	if len(subs) == 0 {
 		return nil, errors.New("no subtitle streams found in input")
 	}
@@ -306,6 +311,9 @@ func ProbeVideoSize(video string) (int, int, error) {
 // returns a parsed ASS document. onProgress is called with (seconds, fraction)
 // roughly as ffmpeg reports time; it may be nil.
 func extractSubtitle(video string, s *Stream, tmpDir, role string, duration float64, onProgress func(seconds, frac float64)) (*ASSDoc, error) {
+	if s.External {
+		return parseExternalSubtitle(s.Path)
+	}
 	raw := filepath.Join(tmpDir, role+".ass")
 	var codec string
 	switch s.CodecName {
@@ -447,9 +455,17 @@ func MergeTracks(video string, primary, secondary int, outPath, reportPath strin
 		}
 	}
 
+	if prim.External {
+		emitProgress(reportProgress, Progress{Stage: "extract", Role: "primary", Overall: stagePrimaryStart, Step: 1,
+			Message: "reading external primary subtitle file…"})
+	}
 	primDoc, err := extractSubtitle(video, prim, tmpDir, "primary", duration, tick("primary"))
 	if err != nil {
 		return nil, fmt.Errorf("primary track: %w", err)
+	}
+	if sec.External {
+		emitProgress(reportProgress, Progress{Stage: "extract", Role: "secondary", Overall: stageSecondStart, Step: 1,
+			Message: "reading external secondary subtitle file…"})
 	}
 	secDoc, err := extractSubtitle(video, sec, tmpDir, "secondary", duration, tick("secondary"))
 	if err != nil {
