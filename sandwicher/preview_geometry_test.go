@@ -52,6 +52,42 @@ func TestPerspectiveBoxFinite(t *testing.T) {
 	}
 }
 
+func TestEffectMotion(t *testing.T) {
+	for _, s := range []string{"Banner;5;0;50", "Scroll up;0;100;5", "scroll down;0;100;5"} {
+		if !effectMotion(s) {
+			t.Errorf("effectMotion(%q) = false", s)
+		}
+	}
+	for _, s := range []string{"", "karaoke", "fade"} {
+		if effectMotion(s) {
+			t.Errorf("effectMotion(%q) = true", s)
+		}
+	}
+}
+
+func TestEstimatedSamplesTrackMoveInsteadOfLifetimeUnion(t *testing.T) {
+	d := &Dialogue{Text: `{\move(100,100,500,100)}hello`}
+	g := measureEvent(d, geomStyle(), 640, 360)
+	ev := &plannedEvent{
+		d: d, geom: g, moving: true, startSec: 0, endSec: 4,
+		order: 0, finalAlign: 2, bbox: g.lifetimeBox(0, 4, 640, 360),
+	}
+	samples := estimatedSamples(ev, 640, 360)
+	if len(samples) < 3 {
+		t.Fatalf("samples = %+v", samples)
+	}
+	first, last := samples[0], samples[len(samples)-1]
+	if !first.Estimated || !last.Estimated {
+		t.Fatal("estimated samples must be marked")
+	}
+	if math.Abs(first.Box.X0-last.Box.X0) < 300 {
+		t.Fatalf("samples do not follow move: %+v -> %+v", first.Box, last.Box)
+	}
+	if ev.bbox.W() <= first.Box.W() {
+		t.Fatalf("lifetime union %+v should be wider than one sample %+v", ev.bbox, first.Box)
+	}
+}
+
 func TestApplyNudgeMovesRotationOrigin(t *testing.T) {
 	st := geomStyle()
 	d := &Dialogue{Text: `{\org(300,200)\frz30\pos(320,300)}hi`, Style: "Default"}

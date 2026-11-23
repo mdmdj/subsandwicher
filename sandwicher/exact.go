@@ -408,7 +408,14 @@ func formatCS(seconds float64) string {
 // mask cannot describe \t transforms, because the glyph outline changes while
 // the event is on screen. Static events keep one sample.
 func (e *exactContext) samplesFor(ev *plannedEvent, primarySeek float64, primary *inkMask) []BoxSample {
-	if e == nil || ev == nil || ev.geom == nil || !ev.geom.animated || primary == nil {
+	if e == nil || ev == nil || ev.geom == nil || primary == nil {
+		return nil
+	}
+	// \move is translated analytically by the preview. \t transforms and
+	// Effect-column motion (Banner/Scroll) need real boxes across the lifetime.
+	// Effect motion is not `moving`: it has no \move tag and positional fixes
+	// still work the same way.
+	if !ev.geom.animated && !effectMotion(ev.d.Effect) {
 		return nil
 	}
 	out := []BoxSample{{Time: round2(primarySeek), Box: roundBox(primary.Box), Coverage: primary.Coverage}}
@@ -416,7 +423,7 @@ func (e *exactContext) samplesFor(ev *plannedEvent, primarySeek float64, primary
 	if end-start < 0.12 {
 		return out
 	}
-	for _, f := range []float64{0.08, 0.25, 0.5, 0.75, 0.92} {
+	for _, f := range []float64{0.05, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 0.97} {
 		t := start + (end-start)*f
 		if t < start+0.03 {
 			t = start + 0.03

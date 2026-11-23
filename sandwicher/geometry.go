@@ -258,6 +258,16 @@ func tagMove(text string) *Move {
 	return mv
 }
 
+// effectMotion reports whether the ASS Effect column animates the event. These
+// events have no \move tag, but libass still moves them across the screen, so a
+// single exact box at one seek is stale at every other frame.
+func effectMotion(effect string) bool {
+	e := strings.ToLower(strings.TrimSpace(effect))
+	return strings.HasPrefix(e, "banner") ||
+		strings.HasPrefix(e, "scroll up") ||
+		strings.HasPrefix(e, "scroll down")
+}
+
 func isDrawing(text string) bool {
 	ms := reDrawingTag.FindAllStringSubmatch(text, -1)
 	for _, m := range ms {
@@ -601,6 +611,28 @@ func (g *eventGeom) boxAt(tSec, startSec, endSec, playW, playH float64) Box {
 		out.Y0 = math.Min(out.Y0, ry)
 		out.X1 = math.Max(out.X1, rx)
 		out.Y1 = math.Max(out.Y1, ry)
+	}
+	return out
+}
+
+// estimatedSamples gives the preview time-specific boxes for events that have
+// no exact mask. The lifetime union is far too broad for hit-testing: a moving
+// label would stay clickable across its whole path even when it is elsewhere.
+func estimatedSamples(ev *plannedEvent, playW, playH float64) []BoxSample {
+	if ev == nil || ev.geom == nil || (!ev.moving && !ev.geom.animated) {
+		return nil
+	}
+	const steps = 9
+	out := make([]BoxSample, 0, steps)
+	dur := ev.endSec - ev.startSec
+	for i := 0; i < steps; i++ {
+		f := float64(i) / float64(steps-1)
+		t := ev.startSec + dur*f
+		b := ev.geom.boxAt(t, ev.startSec, ev.endSec, playW, playH)
+		if !b.Valid() {
+			continue
+		}
+		out = append(out, BoxSample{Time: round2(t), Box: roundBox(b), Estimated: true})
 	}
 	return out
 }

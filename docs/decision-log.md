@@ -227,9 +227,13 @@ By default the CLI now adds an exact pass (`--no-exact` turns it off):
 - Each exact box also carries `coverage`, a 16x8 hex occupancy grid used by the
   preview hit-test. It lets a click on the empty corner of a rotated/skewed
   bounding box miss instead of selecting the event.
-- Events with `\t` animated transforms get `boxSamples` across their lifetime,
-  each with its own exact box and coverage, because one mask cannot describe a
-  shape that changes while the event is on screen.
+- Events with `\t` animated transforms or Effect-column motion (`Banner`,
+  `Scroll up/down`) get `boxSamples` across their lifetime, each with its own
+  exact box and coverage, because one mask cannot describe a shape that changes
+  or moves while the event is on screen.
+- Events without an exact mask get time-specific estimated `boxSamples` when
+  they move, so the preview does not hit-test against the whole-lifetime union
+  box.
 - Conflicts are re-checked at their peak with mask intersections. A pair whose
   boxes overlap but whose ink does not (for example text padding around a
   sign) is dropped before windows are built. In the E06 session this removed 10

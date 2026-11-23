@@ -1614,6 +1614,10 @@ function eventHasTransform(ev) {
   return !!transformInfoJS(ev);
 }
 
+function effectMoves(ev) {
+  return /^(banner|scroll\s+up|scroll\s+down)/i.test(String((ev && ev.effect) || '').trim());
+}
+
 // Exact ink box for the requested time. Static events keep one mask; animated
 // \t transforms carry several samples and moving events translate the nearest
 // sample along \move.
@@ -1632,10 +1636,28 @@ function eventExactBox(ev, time) {
     sample = { time: Number(ev.exactSeek), box: ev.exactBBox };
   }
   if (!sample || !sample.box) return null;
-  if (!ev.moving) return sample.box;
+  // Estimated samples are already positioned at their sample time. Translating
+  // them along \move would count the movement twice.
+  if (!ev.moving || sample.estimated || effectMoves(ev)) return sample.box;
   const from = Number(sample.time);
   if (!Number.isFinite(from)) return null;
   return movingBoxAt(ev, time, sample.box, from) || sample.box;
+}
+
+// Whether the box shown at this time comes from an exact mask sample or from
+// the geometry estimator.
+function eventBoxSource(ev, time) {
+  const samples = Array.isArray(ev.boxSamples) ? ev.boxSamples.filter(s => s && s.box) : [];
+  if (samples.length) {
+    let sample = samples[0];
+    let best = Math.abs((Number(sample.time) || 0) - time);
+    for (const s of samples.slice(1)) {
+      const d = Math.abs((Number(s.time) || 0) - time);
+      if (d < best) { best = d; sample = s; }
+    }
+    return sample.estimated ? 'estimate' : 'samples';
+  }
+  return ev.exactBBox ? 'exact' : 'estimate';
 }
 
 // Coarse ink coverage for the sample nearest `time`, if one was measured.
@@ -1882,16 +1904,20 @@ function hitTestPreviewEvent(w, nx, ny, time, screenW, screenH) {
     const cand = {
       eventId: id, windowId: hitWin.id, layer, inWin, box: b,
       distPx: Math.round(distPx * 10) / 10, ink,
-      source: ev.boxSamples && ev.boxSamples.length ? 'samples' : ev.exactBBox ? 'exact' : 'estimate',
+      source: eventBoxSource(ev, time),
       transform: transformLabel(ev) || undefined,
+      moving: !!ev.moving,
+      effect: ev.effect || undefined,
       role: ev.role, align: ev.align,
+      text: ev.text || undefined,
     };
     if (candidates.length < 40) candidates.push(cand);
     // Inside the AABB but outside the ink (rotated corner or letter gap): do
     // not claim the click for this event.
     if (distPx === 0 && !ink) continue;
-    const winsTie = (cur) => inWin !== cur.inWin ? inWin
-      : layer !== cur.layer ? layer > cur.layer : id > cur.eventId;
+    // ASS draw order is layer first, then file order (later wins). Window
+    // membership must not outrank stacking; we switch windows after a hit.
+    const winsTie = (cur) => layer !== cur.layer ? layer > cur.layer : id > cur.eventId;
     if (distPx === 0) {
       if (!best || winsTie(best)) best = { ...cand, key: layer * 1000000 + id };
     } else if (distPx <= grabPx) {
@@ -2222,6 +2248,8 @@ function handlePreviewDrag(p) {
         eventId: hit.eventId, windowId: hit.windowId, inWindow: hit.inWin,
         box: hit.box, distPx: hit.distPx, source: hit.source,
         transform: hit.transform, role: hit.role, align: hit.align,
+        layer: hit.layer, moving: hit.moving, text: hit.text,
+        effect: hit.effect,
       } : null,
       candidates: candidates,
     };
@@ -2273,6 +2301,8 @@ function handlePreviewDrag(p) {
       box: hit.box, boxes: boxes.length, source: hit.source,
       transform: hit.transform, role: hit.role, align: hit.align,
       distancePx: hit.distPx, inWindow: hit.inWin,
+      layer: hit.layer, moving: hit.moving, text: hit.text,
+      effect: hit.effect,
     });
     if (state.pendingBase) {
       state.bases[baseKey(w, hit.eventId)] = state.pendingBase;

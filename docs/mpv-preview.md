@@ -97,12 +97,15 @@ margins, mouse position and `par`; those values are written to the app log.
 The controller hit-tests with the exact libass ink box from the decision log
 when available. A coarse 16x8 ink-coverage grid travels with each exact box, so
 clicking an empty corner of a rotated/skewed bounding box does not select it.
-`\t` animated transforms get several `boxSamples` across the event, and moving
-events translate the nearest sample along `\move`. Events without an exact mask
-fall back to the estimated box, which now models `\frz`, `\frx`, `\fry`,
-`\fax` and `\fay` plus `\org`. A click logs the play-res coordinate, every
-candidate box, distance in screen pixels, ink hit and the transform tags, so a
-bad hit can be reported from one log file.
+`\t` animated transforms and Effect-column motion (`Banner`, `Scroll up`,
+`Scroll down`) get several `boxSamples` across the event, and moving events
+translate the nearest `\move` sample. Events without an exact mask get
+time-specific estimated samples instead of the whole-lifetime union box, so a
+moving label is not clickable across its entire path. The estimator models
+`\frz`, `\frx`, `\fry`, `\fax` and `\fay` plus `\org`. A click logs the
+play-res coordinate, every candidate box, distance in screen pixels, ink hit,
+layer, text, moving/effect flags and the transform tags, so a bad hit can be
+reported from one log file.
 
 Positional fixes translate `\org` together with `\pos`/`\move`. Changing only
 the position of a rotated label would otherwise make it rotate around a stale

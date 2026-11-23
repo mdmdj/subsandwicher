@@ -107,6 +107,10 @@ type BoxSample struct {
 	Time     float64 `json:"time"`
 	Box      Box     `json:"box"`
 	Coverage string  `json:"coverage,omitempty"`
+	// Estimated marks a sample built from the geometry estimator rather than a
+	// libass render. Estimated samples are already at their sample time, so the
+	// preview must not translate them along \move a second time.
+	Estimated bool `json:"estimated,omitempty"`
 }
 
 // EventDecision is the per-event log entry.
@@ -122,6 +126,7 @@ type EventDecision struct {
 	Align      int         `json:"align"`
 	Pos        *Point      `json:"pos,omitempty"`
 	Moving     bool        `json:"moving"`
+	Effect     string      `json:"effect,omitempty"`
 	BBox       Box         `json:"bbox"`
 	BBoxExact  bool        `json:"bboxExact"`
 	ExactBBox  *Box        `json:"exactBBox,omitempty"`
@@ -877,6 +882,8 @@ func buildReport(events []*plannedEvent, job JobInfo, playW, playH float64, exac
 		}
 		if len(ev.samples) > 0 {
 			samples = ev.samples
+		} else {
+			samples = estimatedSamples(ev, playW, playH)
 		}
 		rep.Events = append(rep.Events, EventDecision{
 			ID:         ev.order,
@@ -890,6 +897,7 @@ func buildReport(events []*plannedEvent, job JobInfo, playW, playH float64, exac
 			Align:      ev.finalAlign,
 			Pos:        pos,
 			Moving:     ev.moving,
+			Effect:     strings.TrimSpace(ev.d.Effect),
 			BBox:       roundBox(ev.bbox),
 			BBoxExact:  false,
 			ExactBBox:  exactBox,
