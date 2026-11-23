@@ -170,6 +170,8 @@ SUBS_CORPUS_DIR="/path/to/media" go test ./sandwicher -run Corpus -v
       "bbox": { "x0": 316, "y0": 309, "x1": 495, "y1": 338 },
       "exactBBox": { "x0": 320, "y0": 306, "x1": 490, "y1": 333 },
       "exactSeek": 3.32,
+      "coverage": "001122...", "marginL": 10, "marginR": 10, "marginV": 20,
+      "transform": { "rotZ": 12, "tags": "\\frz12", "animated": false },
       "importance": 0.898, "level": 3, "levelName": "critical",
       "surface": "review",
       "decisions": [ { "rule": "conflict.sign-dialogue", ... } ]
@@ -207,8 +209,10 @@ SUBS_CORPUS_DIR="/path/to/media" go test ./sandwicher -run Corpus -v
 
 `bbox` is an estimate (`bboxExact: false` in estimate-only mode): character
 advances, explicit line breaks, simple wrapping at the margins, style and
-inline sizes, anchor or `\pos`/`\move`, and rotation AABB. It is deterministic
-and dependency-free, not libass-exact.
+inline sizes, anchor or `\pos`/`\move`, plus `\frz`, `\frx`, `\fry`, `\fax`,
+`\fay` and `\org` transforms. It is deterministic and dependency-free, not
+libass-exact. `transform` lists the tags that make it approximate. `margin*`
+lets the preview derive the same layout anchor libass uses for `\pos`.
 
 ### Exact ink masks
 
@@ -220,6 +224,12 @@ By default the CLI now adds an exact pass (`--no-exact` turns it off):
   opacity tags are stripped so a fade does not erase the shape.
 - Alpha coverage is read per pixel (a 1-bit mask). The report gets `exactBBox`
   and `exactSeek`; the mask itself stays in memory and is not serialized.
+- Each exact box also carries `coverage`, a 16x8 hex occupancy grid used by the
+  preview hit-test. It lets a click on the empty corner of a rotated/skewed
+  bounding box miss instead of selecting the event.
+- Events with `\t` animated transforms get `boxSamples` across their lifetime,
+  each with its own exact box and coverage, because one mask cannot describe a
+  shape that changes while the event is on screen.
 - Conflicts are re-checked at their peak with mask intersections. A pair whose
   boxes overlap but whose ink does not (for example text padding around a
   sign) is dropped before windows are built. In the E06 session this removed 10

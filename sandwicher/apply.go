@@ -109,6 +109,10 @@ func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult,
 	}
 
 	res := &ApplyResult{Out: outPath}
+	playW, playH := rep.Job.PlayResX, rep.Job.PlayResY
+	if playW <= 0 || playH <= 0 {
+		playW, playH = playRes(doc)
+	}
 	for _, fix := range fixes {
 		if fix.SuggestionIndex < 0 {
 			continue
@@ -127,12 +131,13 @@ func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult,
 		s = applyOverride(s, fix.Override)
 		d := doc.Dialogues[s.Event]
 		before := d.Text
+		st := styles[d.Style]
 		switch s.Kind {
 		case "nudge":
 			if s.At == nil && !reMoveTag.MatchString(d.Text) {
 				return nil, fmt.Errorf("window %d suggestion %d has no target anchor", fix.WindowID, fix.SuggestionIndex)
 			}
-			applyPosition(d, s)
+			applyPosition(d, s, st, playW, playH)
 		case "shrink":
 			if s.FontScale <= 0 {
 				return nil, fmt.Errorf("window %d suggestion %d has invalid font scale", fix.WindowID, fix.SuggestionIndex)
@@ -141,16 +146,17 @@ func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult,
 			d.Text = setFs(d.Text, fs*s.FontScale)
 			if s.At != nil {
 				d.Text = setPos(d.Text, *s.At)
+				d.Text = scaleOrg(d.Text, *s.At, s.FontScale)
 			}
 		case "hide":
 			d.Text = setAlphaHidden(d.Text)
 		case "raise":
 			layer := atoiDefault(d.Layer, 0)
 			d.Layer = strconv.Itoa(layer + 1)
-			applyPosition(d, s)
+			applyPosition(d, s, st, playW, playH)
 		case "top":
 			d.Layer = strconv.Itoa(topLayer(doc.Dialogues) + 1)
-			applyPosition(d, s)
+			applyPosition(d, s, st, playW, playH)
 		default:
 			return nil, fmt.Errorf("window %d suggestion %d has unknown kind %q", fix.WindowID, fix.SuggestionIndex, s.Kind)
 		}
@@ -174,10 +180,6 @@ func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult,
 
 	// Measure the result so the UI can warn about fixes that leave the safe
 	// area or the video frame. The report's bbox is the pre-fix geometry.
-	playW, playH := rep.Job.PlayResX, rep.Job.PlayResY
-	if playW <= 0 || playH <= 0 {
-		playW, playH = playRes(doc)
-	}
 	original := map[int]Box{}
 	for _, e := range rep.Events {
 		original[e.ID] = e.BBox
@@ -219,16 +221,114 @@ func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult,
 // applyPosition applies the optional positional part of a fix. Top/raise
 // candidates normally have no position, but a manual override can combine them
 // with a move so dragging an already-raised event still works.
-func applyPosition(d *Dialogue, s Suggestion) {
+//
+// If the event has an \org, the rotation origin must move with the text.
+// Changing \pos alone would leave the rendered shape rotating around the old
+// origin, so a rotated/skewed label jumps or skews instead of translating.
+func applyPosition(d *Dialogue, s Suggestion, st *ASSStyle, playW, playH float64) {
 	if reMoveTag.MatchString(d.Text) {
 		if s.Dx != 0 || s.Dy != 0 {
 			d.Text = moveBy(d.Text, s.Dx, s.Dy)
+			d.Text = translateOrg(d.Text, s.Dx, s.Dy)
 		}
 		return
 	}
-	if s.At != nil {
-		d.Text = setPos(d.Text, *s.At)
+	if s.At == nil {
+		return
 	}
+	old, ok := eventAnchor(d, st, playW, playH)
+	if ok {
+		d.Text = translateOrg(d.Text, s.At.X-old.X, s.At.Y-old.Y)
+	}
+	d.Text = setPos(d.Text, *s.At)
+}
+
+// eventAnchor is the alignment point the event currently uses, before a fix.
+func eventAnchor(d *Dialogue, st *ASSStyle, playW, playH float64) (Point, bool) {
+	if p := tagPoint(rePosTag, d.Text); p != nil {
+		return *p, true
+	}
+	if playW <= 0 || playH <= 0 {
+		return Point{}, false
+	}
+	align := styleInt(st, "alignment")
+	if n, ok := inlineAlign(d.Text); ok {
+		align = n
+	}
+	if align < 1 || align > 9 {
+		align = 2
+	}
+	ml := styleFloat(st, "marginl", 10)
+	mr := styleFloat(st, "marginr", 10)
+	mv := styleFloat(st, "marginv", 10)
+	if v, err := strconv.Atoi(strings.TrimSpace(d.MarginL)); err == nil && v != 0 {
+		ml = float64(v)
+	}
+	if v, err := strconv.Atoi(strings.TrimSpace(d.MarginR)); err == nil && v != 0 {
+		mr = float64(v)
+	}
+	if v, err := strconv.Atoi(strings.TrimSpace(d.MarginV)); err == nil && v != 0 {
+		mv = float64(v)
+	}
+	var x, y float64
+	switch align % 3 {
+	case 1:
+		x = ml
+	case 0:
+		x = playW - mr
+	default:
+		x = playW / 2
+	}
+	switch {
+	case align <= 3:
+		y = playH - mv
+	case align <= 6:
+		y = playH / 2
+	default:
+		y = mv
+	}
+	return Point{X: x, Y: y}, true
+}
+
+// translateOrg shifts a \org tag by the same delta as the text. Events without
+// \org are returned unchanged.
+func translateOrg(text string, dx, dy float64) string {
+	if dx == 0 && dy == 0 {
+		return text
+	}
+	return reOrgTag.ReplaceAllStringFunc(text, func(m string) string {
+		s := reOrgTag.FindStringSubmatch(m)
+		if len(s) < 3 {
+			return m
+		}
+		x, err1 := strconv.ParseFloat(s[1], 64)
+		y, err2 := strconv.ParseFloat(s[2], 64)
+		if err1 != nil || err2 != nil {
+			return m
+		}
+		return fmt.Sprintf(`\org(%s,%s)`, formatNum(x+dx), formatNum(y+dy))
+	})
+}
+
+// scaleOrg keeps a rotation origin in the same position relative to the text
+// when a shrink fix changes the font size around anchor.
+func scaleOrg(text string, anchor Point, scale float64) string {
+	if scale <= 0 || scale == 1 {
+		return text
+	}
+	return reOrgTag.ReplaceAllStringFunc(text, func(m string) string {
+		s := reOrgTag.FindStringSubmatch(m)
+		if len(s) < 3 {
+			return m
+		}
+		x, err1 := strconv.ParseFloat(s[1], 64)
+		y, err2 := strconv.ParseFloat(s[2], 64)
+		if err1 != nil || err2 != nil {
+			return m
+		}
+		return fmt.Sprintf(`\org(%s,%s)`,
+			formatNum(anchor.X+(x-anchor.X)*scale), formatNum(anchor.Y+(y-anchor.Y)*scale))
+	})
 }
 
 // applyOverride merges a manual edit into a generated candidate. Position edits

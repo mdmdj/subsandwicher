@@ -85,3 +85,29 @@ If the user (or anything) kills mpv, the session object marks itself
 `dead`; the next controller command that needs a window (`jump-random-frame`,
 review-next-frame) transparently relaunches and seeks straight to that
 command's timestamp instead of erroring.
+
+## Preview geometry and hit-testing
+
+Mouse messages are normalized by `mpv-drag.lua` against `osd-dimensions`
+(window size minus the `ml/mr/mt/mb` video margins). Deltas use the start and
+current *normalized* positions, so resizing the mpv window during a drag does
+not stretch or shift the result. Every phase also carries the raw OSD size,
+margins, mouse position and `par`; those values are written to the app log.
+
+The controller hit-tests with the exact libass ink box from the decision log
+when available. A coarse 16x8 ink-coverage grid travels with each exact box, so
+clicking an empty corner of a rotated/skewed bounding box does not select it.
+`\t` animated transforms get several `boxSamples` across the event, and moving
+events translate the nearest sample along `\move`. Events without an exact mask
+fall back to the estimated box, which now models `\frz`, `\frx`, `\fry`,
+`\fax` and `\fay` plus `\org`. A click logs the play-res coordinate, every
+candidate box, distance in screen pixels, ink hit and the transform tags, so a
+bad hit can be reported from one log file.
+
+Positional fixes translate `\org` together with `\pos`/`\move`. Changing only
+the position of a rotated label would otherwise make it rotate around a stale
+origin and appear to jump.
+
+Known limits: per-glyph inline transforms are still estimated, and `\frx`/
+`\fry` perspective uses libass's camera-distance approximation rather than a
+full glyph render when no exact mask exists.

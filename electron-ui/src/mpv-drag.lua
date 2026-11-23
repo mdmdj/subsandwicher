@@ -14,6 +14,8 @@ local drag = {
   active = false,
   mode = 'normal',
   start = nil,
+  startNX = 0,
+  startNY = 0,
   playW = 0,
   playH = 0,
   boxes = {},
@@ -46,11 +48,16 @@ local function video_rect()
 end
 
 local function send(phase, x, y, time, dx, dy)
-  local _, sw, sh = video_rect()
+  local d, sw, sh = video_rect()
+  local m = mp.get_property_native('mouse-pos')
   mp.commandv('script-message', 'subsandwicher-drag', phase,
     tostring(x or ''), tostring(y or ''), tostring(drag.mode or 'normal'),
     tostring(time or ''), tostring(dx or ''), tostring(dy or ''),
-    tostring(sw or 0), tostring(sh or 0))
+    tostring(sw or 0), tostring(sh or 0),
+    tostring(d and d.w or 0), tostring(d and d.h or 0),
+    tostring(d and d.ml or 0), tostring(d and d.mt or 0),
+    tostring(m and m.x or ''), tostring(m and m.y or ''),
+    tostring(d and d.par or 1))
 end
 
 local function ghost_data()
@@ -81,13 +88,17 @@ end
 
 -- Convert the current mouse position to a delta from the drag start, in
 -- PlayRes coordinates. Shift locks the dominant axis; Alt scales the delta.
+-- Using normalized positions (not raw pixels) keeps the drag correct if the
+-- mpv window is resized while the button is held.
 local function current_delta()
   if not drag.start then return 0, 0 end
   local d, w, h = video_rect()
   local m = mp.get_property_native('mouse-pos')
-  if not d or not m or drag.playW <= 0 or drag.playH <= 0 then return 0, 0 end
-  local dx = (m.x - drag.start.x) / w * drag.playW
-  local dy = (m.y - drag.start.y) / h * drag.playH
+  if not d or not m or drag.playW <= 0 or drag.playH <= 0 or w <= 0 or h <= 0 then return 0, 0 end
+  local nx = (m.x - (d.ml or 0)) / w
+  local ny = (m.y - (d.mt or 0)) / h
+  local dx = (nx - drag.startNX) * drag.playW
+  local dy = (ny - drag.startNY) * drag.playH
   if drag.mode == 'axis' then
     if math.abs(dx) >= math.abs(dy) then
       dy = 0
@@ -119,7 +130,10 @@ local function begin_drag(mode)
       if drag.active then return end
       local d, w, h = video_rect()
       local m = mp.get_property_native('mouse-pos')
-      if not d or not m then return end
+      if not d or not m then
+        mp.msg.warn('subsandwicher: mouse-down without osd-dimensions/mouse-pos; drag ignored')
+        return
+      end
       local key = string.lower(e.key_name or '')
       if key:find('ctrl', 1, true) then return end
       -- A click on one of the referent anchor handles places the selected sign.
@@ -148,6 +162,9 @@ local function begin_drag(mode)
       overlay:remove()
       local nx = (m.x - (d.ml or 0)) / w
       local ny = (m.y - (d.mt or 0)) / h
+      drag.start = { x = m.x, y = m.y }
+      drag.startNX = nx
+      drag.startNY = ny
       send('down', nx, ny, mp.get_property_number('time-pos'))
     elseif e.event == 'up' then
       if not drag.active then return end

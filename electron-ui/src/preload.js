@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('subsandwicher', {
   previewPlayback: (payload) => ipcRenderer.invoke('preview-playback', payload),
   confirmSave: (payload) => ipcRenderer.invoke('confirm-save', payload),
   getLogPath: () => ipcRenderer.invoke('get-log-path'),
+  debugLog: (level, message, data) => ipcRenderer.invoke('debug-log', level, message, data),
   getAppMeta: () => ipcRenderer.invoke('get-app-meta'),
   eject: () => ipcRenderer.invoke('eject'),
   copyText: (text) => ipcRenderer.invoke('copy-text', text),

@@ -259,19 +259,28 @@ function handleMpvDrag(args) {
   let list = args || [];
   // JSON IPC may include the script-message name as the first payload arg.
   if (list[0] === 'subsandwicher-drag') list = list.slice(1);
-  const [phase, x, y, mode, time, dx, dy, screenW, screenH] = list;
+  const [phase, x, y, mode, time, dx, dy, screenW, screenH,
+    osdW, osdH, marginL, marginT, mouseX, mouseY, par] = list;
   if (!['down', 'move', 'up', 'cancel', 'nudge', 'reset'].includes(phase)) return;
-  if (phase !== 'move') {
-    log('info', 'preview drag', { phase, x, y, mode, time, dx, dy });
-  }
-  if (phase === 'down') {
-    stopPlayback().catch((e) => log('warn', 'pause for drag failed', e.message));
-  }
   const numOrNull = (v) => {
     if (v === undefined || v === null || v === '') return null;
     const n = Number(v);
     return Number.isFinite(n) ? n : null;
   };
+  // Mouse-move payloads are high frequency; log only the phase boundaries and
+  // capture the full OSD geometry so a coordinate mismatch can be diagnosed.
+  if (phase !== 'move') {
+    log('info', 'preview drag', {
+      phase, x, y, mode, time, dx, dy, screenW, screenH,
+      osdW: numOrNull(osdW), osdH: numOrNull(osdH),
+      marginL: numOrNull(marginL), marginT: numOrNull(marginT),
+      mouseX: numOrNull(mouseX), mouseY: numOrNull(mouseY),
+      par: numOrNull(par),
+    });
+  }
+  if (phase === 'down') {
+    stopPlayback().catch((e) => log('warn', 'pause for drag failed', e.message));
+  }
   mainWindow.webContents.send('preview-drag', {
     phase,
     nx: numOrNull(x),
@@ -282,6 +291,13 @@ function handleMpvDrag(args) {
     dy: numOrNull(dy),
     screenW: numOrNull(screenW),
     screenH: numOrNull(screenH),
+    osdW: numOrNull(osdW),
+    osdH: numOrNull(osdH),
+    marginL: numOrNull(marginL),
+    marginT: numOrNull(marginT),
+    mouseX: numOrNull(mouseX),
+    mouseY: numOrNull(mouseY),
+    par: numOrNull(par),
   });
 }
 
@@ -322,6 +338,15 @@ async function applyPreviewFixes(fixes, seekTo, keepPlaying) {
       video: ctx.videoPath, mergedSub: ctx.previewPath, seekTo: typeof seekTo === 'number' ? seekTo : 0,
     });
   }
+  log('info', 'preview fixes applied', {
+    previewPath: ctx.previewPath,
+    seekTo: typeof seekTo === 'number' ? seekTo : null,
+    keepPlaying,
+    applied: (res.applied || []).map(a => ({
+      event: a.event, kind: a.kind, bbox: a.bbox,
+      safeOutside: a.safeOutside, frameOutside: a.frameOutside,
+    })),
+  });
   return {
     ok: true,
     applied: res.applied || [],
@@ -329,7 +354,6 @@ async function applyPreviewFixes(fixes, seekTo, keepPlaying) {
     keepPlaying: resumed,
   };
 }
-
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null); // no menu bar; not relevant to our flow
   initLog(app.getPath('userData'));
@@ -348,6 +372,15 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('get-log-path', () => logPath());
+
+  // Renderer-side diagnostics (hit testing, preview geometry) land in the same
+  // stamped log as main-process events, so one file is enough for a report.
+  ipcMain.handle('debug-log', (_e, level, message, data) => {
+    const lvl = ['debug', 'info', 'warn', 'error'].includes(level) ? level : 'info';
+    if (data === undefined) log(lvl, `ui: ${message}`);
+    else log(lvl, `ui: ${message}`, data);
+    return true;
+  });
 
   ipcMain.handle('probe-video', async (_e, videoPath) => {
     log('info', 'probe video', videoPath);

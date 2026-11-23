@@ -268,8 +268,11 @@ func placeCandidates(ev *plannedEvent, at float64, active []*plannedEvent, playW
 		}
 		var anchor *Point
 		if !ev.moving {
-			p := anchorForBox(box, ev.finalAlign)
-			anchor = &Point{X: round2(p.X), Y: round2(p.Y)}
+			if p, ok := ev.geom.layoutAnchorAt(at, ev.startSec, ev.endSec, playW, playH); ok {
+				p.X = round2(p.X + dx)
+				p.Y = round2(p.Y + dy)
+				anchor = &p
+			}
 		}
 		s := Suggestion{
 			Event:           ev.order,
@@ -323,7 +326,10 @@ func placeCandidates(ev *plannedEvent, at float64, active []*plannedEvent, playW
 		}
 	}
 	for _, scale := range []float64{0.9, 0.8} {
-		anchor := anchorForBox(b0, ev.finalAlign)
+		anchor, ok := ev.geom.layoutAnchorAt(at, ev.startSec, ev.endSec, playW, playH)
+		if !ok {
+			continue
+		}
 		nb := boxFromAnchor(anchor, w*scale, h*scale, ev.finalAlign)
 		add("shrink", nb, 0, 0, scale, fmt.Sprintf("shrink text to %.0f%%", scale*100))
 	}
@@ -431,6 +437,8 @@ func suggestForWindow(w ConflictWindow, byID map[int]*plannedEvent, conflicts ma
 				ev.exactBox = m.Box
 				ev.exactSeek = seek
 				ev.exactValid = true
+				ev.exactCov = m.Coverage
+				ev.samples = exact.samplesFor(ev, seek, m)
 			}
 		}
 		cands := placeCandidates(ev, seek, active, playW, playH, masks, video)

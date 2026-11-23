@@ -338,6 +338,9 @@ func TestExactInkMask(t *testing.T) {
 		if e.ExactSeek < 10 || e.ExactSeek > 14 {
 			t.Errorf("event %d exact seek %.2f outside the event", e.ID, e.ExactSeek)
 		}
+		if len(e.Coverage) != 16*8*2 {
+			t.Errorf("event %d coverage length %d, want %d", e.ID, len(e.Coverage), 16*8*2)
+		}
 	}
 	if !found {
 		t.Fatal("no event carried an exact bbox")

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"sync"
 	"time"
 )
@@ -42,9 +43,17 @@ type inkMask struct {
 	Box      Box // exact ink bbox in pixels
 	Bits     []uint64
 	InkCells int
+	// Coverage is a coarse hex occupancy grid (16x8 cells, hex byte per cell)
+	// used by the preview to distinguish ink from the empty corners of a
+	// rotated/skewed bounding box.
+	Coverage string
 }
 
-const exactCell = 1
+const (
+	exactCell = 1
+	coverCols = 16
+	coverRows = 8
+)
 
 func newExactContext(assPath string, playW, playH float64) *exactContext {
 	doc, err := parseASSFile(assPath)
@@ -276,6 +285,47 @@ func readInkMask(path string) (*inkMask, error) {
 	for _, w := range m.Bits {
 		m.InkCells += bits.OnesCount64(w)
 	}
+	// Encode occupancy relative to the ink bbox, one hex byte per grid cell.
+	// The preview maps a click into this same bbox, so the grid must not use the
+	// full canvas (a small subtitle would otherwise occupy a fraction of a cell).
+	bw := maxX + 1 - minX
+	bh := maxY + 1 - minY
+	cov := make([]byte, coverCols*coverRows*2)
+	const hexDigits = "0123456789abcdef"
+	for gy := 0; gy < coverRows; gy++ {
+		y0 := minY + gy*bh/coverRows
+		y1 := minY + (gy+1)*bh/coverRows
+		if y1 <= y0 {
+			y1 = y0 + 1
+		}
+		for gx := 0; gx < coverCols; gx++ {
+			x0 := minX + gx*bw/coverCols
+			x1 := minX + (gx+1)*bw/coverCols
+			if x1 <= x0 {
+				x1 = x0 + 1
+			}
+			count := 0
+			for y := y0; y < y1 && y <= maxY; y++ {
+				for x := x0; x < x1 && x <= maxX; x++ {
+					if m.bit(x, y) {
+						count++
+					}
+				}
+			}
+			area := (x1 - x0) * (y1 - y0)
+			v := 0
+			if area > 0 {
+				v = count * 255 / area
+			}
+			if v > 255 {
+				v = 255
+			}
+			pos := (gy*coverCols + gx) * 2
+			cov[pos] = hexDigits[v>>4]
+			cov[pos+1] = hexDigits[v&0xf]
+		}
+	}
+	m.Coverage = string(cov)
 	return m, nil
 }
 
@@ -352,6 +402,39 @@ func formatCS(seconds float64) string {
 		cs = 0
 	}
 	return fmt.Sprintf("%d:%02d:%02d.%02d", cs/360000, (cs%360000)/6000, (cs%6000)/100, cs%100)
+}
+
+// samplesFor returns ink boxes across an animated event's lifetime. A single
+// mask cannot describe \t transforms, because the glyph outline changes while
+// the event is on screen. Static events keep one sample.
+func (e *exactContext) samplesFor(ev *plannedEvent, primarySeek float64, primary *inkMask) []BoxSample {
+	if e == nil || ev == nil || ev.geom == nil || !ev.geom.animated || primary == nil {
+		return nil
+	}
+	out := []BoxSample{{Time: round2(primarySeek), Box: roundBox(primary.Box), Coverage: primary.Coverage}}
+	start, end := ev.startSec, ev.endSec
+	if end-start < 0.12 {
+		return out
+	}
+	for _, f := range []float64{0.08, 0.25, 0.5, 0.75, 0.92} {
+		t := start + (end-start)*f
+		if t < start+0.03 {
+			t = start + 0.03
+		}
+		if t > end-0.03 {
+			t = end - 0.03
+		}
+		if math.Abs(t-primarySeek) < 0.05 {
+			continue
+		}
+		m := e.maskFor(ev.order, t)
+		if m == nil || !m.Box.Valid() {
+			continue
+		}
+		out = append(out, BoxSample{Time: round2(t), Box: roundBox(m.Box), Coverage: m.Coverage})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Time < out[j].Time })
+	return out
 }
 
 // exactSummary is used to report whether masks were actually produced.

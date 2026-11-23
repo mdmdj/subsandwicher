@@ -29,6 +29,7 @@ let state = {
   statuses: {}, // window id -> "done" | "again" (absent = open)
   langsCollapsed: false,
   probing: false,
+  diagnostics: {}, // last preview hit/drag/OSD geometry, copied with review state
 };
 
 const sel = (s) => document.querySelector(s);
@@ -209,6 +210,7 @@ function resetToLoad(message = '') {
   state.playingWindow = null;
   state.pausedWindow = null;
   state.langsCollapsed = false;
+  state.diagnostics = {};
   actions.classList.add('hidden');
   actions.classList.remove('review-mode');
   review.classList.add('hidden');
@@ -462,6 +464,7 @@ async function eject() {
   state.playingWindow = null;
   state.pausedWindow = null;
   state.langsCollapsed = false;
+  state.diagnostics = {};
   actions.classList.add('hidden');
   actions.classList.remove('review-mode');
   review.classList.add('hidden');
@@ -1034,7 +1037,8 @@ function eventDetailsHtml(ev) {
     `${escapeHtml(fmtClock(ev.start))}–${escapeHtml(fmtClock(ev.end))} · align ${ev.align}` +
     `${ev.pos ? ` · pos ${fmtNum(ev.pos.x)},${fmtNum(ev.pos.y)}` : ''} · importance ${fmtNum(ev.importance, 2)}</div>` +
     `<div class="txt">${escapeHtml(ev.text || '')}</div>` +
-    `<div class="dec">${boxLabel}${ev.moving ? ' · moving' : ''}</div>` +
+    `<div class="dec">${boxLabel}${ev.moving ? ' · moving' : ''}` +
+    `${transformLabel(ev) ? ` · transform ${escapeHtml(transformLabel(ev))}` : ''}</div>` +
     decisions +
     (ev.raw ? `<details><summary class="dec">raw ASS</summary><div class="raw">${escapeHtml(ev.raw)}</div></details>` : '') +
     '</details>';
@@ -1447,14 +1451,12 @@ function moveEventsBy(w, eventIds, dx, dy, opts = {}) {
       // position, not from the candidate's own offset.
       if (!ev.moving) {
         if (!baseBox && !ev.pos) { skipped++; continue; }
-        const origAnchor = ev.pos
-          ? { x: Number(ev.pos.x), y: Number(ev.pos.y) }
-          : anchorForBoxJS(baseBox, ev.align);
+        const origAnchor = eventAnchorJS(ev, baseBox, previewPlayRes());
         edit = {
           suggestionId: base.id,
           kind: base.s.kind,
-          dx: 0,
-          dy: 0,
+          dx,
+          dy,
           fontScale: Math.round((Number(base.s.fontScale) || 1) * 100),
           at: { x: origAnchor.x + dx, y: origAnchor.y + dy },
           posTouched: true,
@@ -1535,6 +1537,9 @@ function moveEventsBy(w, eventIds, dx, dy, opts = {}) {
         : opts.source === 'group' ? 'group move' : 'move';
   setStatus(`${verb}: ${moved} event(s) by ${signed(dx)},${signed(dy)}` +
     (skipped ? `; ${skipped} skipped (non-positional fix)` : ''));
+  uiLog('info', 'preview move', {
+    windowId: w.id, eventIds, dx, dy, moved, skipped, source: opts.source || 'move',
+  });
   return moved;
 }
 
@@ -1549,6 +1554,147 @@ function previewPlayRes() {
     w: Number(job.playResX) || 640,
     h: Number(job.playResY) || 360,
   };
+}
+
+function uiLog(level, message, data) {
+  try {
+    if (S.debugLog) S.debugLog(level, message, data);
+    else if (level === 'error') console.error(message, data || '');
+    else console.log(message, data || '');
+  } catch (e) { /* logging must never break review */ }
+}
+
+const TRANSFORM_TAGS = [
+  [/\\frx(-?[\d.]+)/g, 'rotX'],
+  [/\\fry(-?[\d.]+)/g, 'rotY'],
+  [/\\f(?:rz|r)(-?[\d.]+)/g, 'rotZ'],
+  [/\\fax(-?[\d.]+)/g, 'skewX'],
+  [/\\fay(-?[\d.]+)/g, 'skewY'],
+  [/\\fscx(-?[\d.]+)/g, 'scaleX'],
+  [/\\fscy(-?[\d.]+)/g, 'scaleY'],
+];
+
+// Summarize the raw ASS transform tags. The Go report already carries this,
+// but events copied from older reports may not.
+function transformInfoJS(ev) {
+  if (ev.transform) return ev.transform;
+  const raw = ev.raw || '';
+  const out = {};
+  for (const [re, key] of TRANSFORM_TAGS) {
+    const ms = [...raw.matchAll(re)];
+    if (ms.length) {
+      const n = Number(ms[ms.length - 1][1]);
+      if (Number.isFinite(n) && n !== 0) out[key] = n;
+    }
+  }
+  if (/\\org\(/.test(raw)) {
+    const m = raw.match(/\\org\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)/);
+    if (m) out.org = { x: Number(m[1]), y: Number(m[2]) };
+  }
+  out.animated = /\\t\s*\(/.test(raw);
+  const tags = [];
+  if (out.rotX) tags.push(`\\frx${out.rotX}`);
+  if (out.rotY) tags.push(`\\fry${out.rotY}`);
+  if (out.rotZ) tags.push(`\\frz${out.rotZ}`);
+  if (out.skewX) tags.push(`\\fax${out.skewX}`);
+  if (out.skewY) tags.push(`\\fay${out.skewY}`);
+  if (out.org) tags.push(`\\org(${out.org.x},${out.org.y})`);
+  if (out.animated) tags.push('\\t(...)');
+  if (tags.length) out.tags = tags.join(' ');
+  return Object.keys(out).length ? out : null;
+}
+
+function transformLabel(ev) {
+  const t = transformInfoJS(ev);
+  if (!t) return '';
+  return t.tags || (t.animated ? '\\t(...)' : 'transform');
+}
+
+function eventHasTransform(ev) {
+  return !!transformInfoJS(ev);
+}
+
+// Exact ink box for the requested time. Static events keep one mask; animated
+// \t transforms carry several samples and moving events translate the nearest
+// sample along \move.
+function eventExactBox(ev, time) {
+  const samples = Array.isArray(ev.boxSamples) ? ev.boxSamples.filter(s => s && s.box) : [];
+  let sample = null;
+  if (samples.length) {
+    sample = samples[0];
+    let best = Math.abs((Number(sample.time) || 0) - time);
+    for (const s of samples.slice(1)) {
+      const d = Math.abs((Number(s.time) || 0) - time);
+      if (d < best) { best = d; sample = s; }
+    }
+  }
+  if (!sample && ev.exactBBox) {
+    sample = { time: Number(ev.exactSeek), box: ev.exactBBox };
+  }
+  if (!sample || !sample.box) return null;
+  if (!ev.moving) return sample.box;
+  const from = Number(sample.time);
+  if (!Number.isFinite(from)) return null;
+  return movingBoxAt(ev, time, sample.box, from) || sample.box;
+}
+
+// Coarse ink coverage for the sample nearest `time`, if one was measured.
+function eventCoverage(ev, time) {
+  const samples = Array.isArray(ev.boxSamples) ? ev.boxSamples.filter(s => s && s.coverage) : [];
+  if (!samples.length) return ev.coverage || '';
+  let sample = samples[0];
+  let best = Math.abs((Number(sample.time) || 0) - time);
+  for (const s of samples.slice(1)) {
+    const d = Math.abs((Number(s.time) || 0) - time);
+    if (d < best) { best = d; sample = s; }
+  }
+  return sample.coverage || ev.coverage || '';
+}
+
+const COVER_COLS = 16;
+const COVER_ROWS = 8;
+const COVER_MIN = 5; // out of 255; ignore nearly empty grid cells
+
+// Test whether a click falls on actual ink inside an exact AABB. Rotated and
+// skewed subtitles have large empty corners; without this, clicking near a
+// label can select it even though no glyph is there.
+function coverageHit(cov, box, x, y) {
+  if (!cov || cov.length < COVER_COLS * COVER_ROWS * 2) return true;
+  const w = box.x1 - box.x0;
+  const h = box.y1 - box.y0;
+  if (!(w > 0) || !(h > 0)) return true;
+  let gx = Math.floor(((x - box.x0) / w) * COVER_COLS);
+  let gy = Math.floor(((y - box.y0) / h) * COVER_ROWS);
+  if (gx < 0) gx = 0; else if (gx >= COVER_COLS) gx = COVER_COLS - 1;
+  if (gy < 0) gy = 0; else if (gy >= COVER_ROWS) gy = COVER_ROWS - 1;
+  const v = parseInt(cov.slice((gy * COVER_COLS + gx) * 2, (gy * COVER_COLS + gx) * 2 + 2), 16);
+  return !Number.isFinite(v) || v >= COVER_MIN;
+}
+
+// The alignment anchor libass uses for \pos. Margin-based anchors are exact for
+// events without \pos, so a first drag does not jump to an estimated centre.
+function eventAnchorJS(ev, box, play) {
+  if (ev.pos && Number.isFinite(Number(ev.pos.x)) && Number.isFinite(Number(ev.pos.y))) {
+    return { x: Number(ev.pos.x), y: Number(ev.pos.y) };
+  }
+  const a = Number(ev.align) || 2;
+  if (Number.isFinite(Number(ev.marginL)) && play && play.w > 0 && play.h > 0) {
+    const ml = Number(ev.marginL) || 0;
+    const mr = Number(ev.marginR) || 0;
+    const mv = Number(ev.marginV) || 0;
+    let x;
+    switch (a % 3) {
+      case 1: x = ml; break;
+      case 0: x = play.w - mr; break;
+      default: x = play.w / 2;
+    }
+    let y;
+    if (a <= 3) y = play.h - mv;
+    else if (a <= 6) y = play.h / 2;
+    else y = mv;
+    return { x, y };
+  }
+  return box ? anchorForBoxJS(box, a) : null;
 }
 
 function anchorForBoxJS(b, align) {
@@ -1603,11 +1749,11 @@ function movePointAt(mv, relSec, durSec) {
   };
 }
 
-function movingBoxAt(ev, time, exactBBox) {
+function movingBoxAt(ev, time, exactBBox, fromTime) {
   const mv = moveTagFromRaw(ev.raw);
-  if (!mv || !exactBBox || !Number.isFinite(ev.exactSeek)) return null;
+  if (!mv || !exactBBox || !Number.isFinite(fromTime)) return null;
   const dur = Math.max(0, ev.end - ev.start);
-  const pe = movePointAt(mv, ev.exactSeek - ev.start, dur);
+  const pe = movePointAt(mv, fromTime - ev.start, dur);
   const pn = movePointAt(mv, time - ev.start, dur);
   const dx = pn.x - pe.x;
   const dy = pn.y - pe.y;
@@ -1621,16 +1767,9 @@ function eventBaseBox(ev, time, visual) {
   // Interactive boxes use the exact ink box when it is valid, so the drag ghost
   // hugs the actual glyphs. Anchor math (visual=false) keeps the estimated box,
   // which is what the placement engine used to derive candidate anchors.
-  if (!ev.moving) {
-    if (visual && ev.exactBBox) return ev.exactBBox;
-    return ev.bbox || ev.exactBBox || null;
-  }
-  if (visual && ev.exactBBox) {
-    // The exact box was measured at exactSeek. Translate it along \move so the
-    // event stays draggable at any paused frame, not only at that seek.
-    const moved = movingBoxAt(ev, time, ev.exactBBox);
-    if (moved) return moved;
-    if (Number.isFinite(ev.exactSeek) && Math.abs(time - ev.exactSeek) <= 0.2) return ev.exactBBox;
+  if (visual) {
+    const exact = eventExactBox(ev, time);
+    if (exact) return exact;
   }
   return ev.bbox || ev.exactBBox || null;
 }
@@ -1640,8 +1779,6 @@ function eventBaseBox(ev, time, visual) {
 function eventCurrentGeometry(w, eventId, ev, time, visual = true) {
   const base = eventBaseBox(ev, time, visual);
   if (!base) return null;
-  const bw = base.x1 - base.x0;
-  const bh = base.y1 - base.y0;
   const chosenId = (state.chosen[w.id] || {})[eventId];
   const s = Number.isInteger(chosenId) ? (w.suggestions || [])[chosenId] : null;
   if (!s) return { box: base };
@@ -1655,13 +1792,11 @@ function eventCurrentGeometry(w, eventId, ev, time, visual = true) {
       const dy = Number(edit.dy) || 0;
       return { box: { x0: base.x0 + dx, y0: base.y0 + dy, x1: base.x1 + dx, y1: base.y1 + dy } };
     }
-    const origAnchor = ev.pos
-      ? { x: Number(ev.pos.x), y: Number(ev.pos.y) }
-      : anchorForBoxJS(base, ev.align);
+    const origAnchor = eventAnchorJS(ev, base, previewPlayRes());
     const at = edit.posTouched && edit.at
       ? { x: Number(edit.at.x), y: Number(edit.at.y) }
       : { x: origAnchor.x + (Number(edit.dx) || 0), y: origAnchor.y + (Number(edit.dy) || 0) };
-    return { box: boxFromAnchorJS(at, bw, bh, ev.align) };
+    return { box: translatedBoxJS(base, origAnchor, at, 1) };
   }
   if (s.kind !== 'nudge' && s.kind !== 'shrink') {
     return { box: base };
@@ -1671,11 +1806,9 @@ function eventCurrentGeometry(w, eventId, ev, time, visual = true) {
   let scale = 1;
   if (s.kind === 'shrink') scale = Math.max(0.05, (Number(edit.fontScale) || 100) / 100);
   if (s.at) {
-    const origAnchor = ev.pos
-      ? { x: Number(ev.pos.x), y: Number(ev.pos.y) }
-      : anchorForBoxJS(base, ev.align);
+    const origAnchor = eventAnchorJS(ev, base, previewPlayRes());
     const target = eff.at || origAnchor;
-    return { box: boxFromAnchorJS(target, bw * scale, bh * scale, ev.align) };
+    return { box: translatedBoxJS(base, origAnchor, target, scale) };
   }
   return {
     box: {
@@ -1685,44 +1818,91 @@ function eventCurrentGeometry(w, eventId, ev, time, visual = true) {
   };
 }
 
-function hitTestPreviewEvent(w, nx, ny, time) {
+// Move a visual box by the same delta as its layout anchor. Using the anchor
+// delta (instead of rebuilding the box from the alignment point) keeps a
+// rotated or skewed AABB from jumping: the AABB anchor is not the layout anchor.
+function translatedBoxJS(base, origAnchor, target, scale = 1) {
+  const dx = target.x - origAnchor.x;
+  const dy = target.y - origAnchor.y;
+  return {
+    x0: origAnchor.x + (base.x0 - origAnchor.x) * scale + dx,
+    y0: origAnchor.y + (base.y0 - origAnchor.y) * scale + dy,
+    x1: origAnchor.x + (base.x1 - origAnchor.x) * scale + dx,
+    y1: origAnchor.y + (base.y1 - origAnchor.y) * scale + dy,
+  };
+}
+
+function eventWindowIndex() {
+  const map = new Map();
+  for (const win of (state.review?.windows || [])) {
+    for (const id of windowEventIds(win)) {
+      if (!map.has(id)) map.set(id, []);
+      map.get(id).push(win);
+    }
+  }
+  return map;
+}
+
+function hitTestPreviewEvent(w, nx, ny, time, screenW, screenH) {
   if (!Number.isFinite(nx) || !Number.isFinite(ny) || !Number.isFinite(time)) return null;
   const play = previewPlayRes();
   const x = nx * play.w;
   const y = ny * play.h;
-  const map = reviewEvents();
+  const owners = eventWindowIndex();
+  const pxX = screenW > 0 && play.w > 0 ? play.w / screenW : 1;
+  const pxY = screenH > 0 && play.h > 0 ? play.h / screenH : 1;
+  const grabPx = 8;
   let best = null;
   let nearest = null;
-  for (const id of windowEventIds(w)) {
-    const ev = map.get(id);
-    if (!ev) continue;
-    const chosenId = Number.isInteger((state.chosen[w.id] || {})[id])
-      ? (state.chosen[w.id] || {})[id]
+  const candidates = [];
+  for (const ev of (state.review?.events || [])) {
+    const id = ev.id;
+    if (time < ev.start - 0.1 || time > ev.end + 0.1) continue;
+    // Prefer the window under review; otherwise use the first window that owns
+    // the event so a click can still select a visible subtitle from a neighbour.
+    const wins = owners.get(id) || [];
+    if (!wins.length) continue;
+    const hitWin = wins.find(x => x.id === w.id) || wins[0];
+    const chosenId = Number.isInteger((state.chosen[hitWin.id] || {})[id])
+      ? (state.chosen[hitWin.id] || {})[id]
       : null;
-    const chosenS = chosenId != null ? (w.suggestions || [])[chosenId] : null;
+    const chosenS = chosenId != null ? (hitWin.suggestions || [])[chosenId] : null;
     if (chosenS && chosenS.kind === 'hide') continue;
     let layer = Number(ev.layer) || 0;
     if (chosenS && chosenS.kind === 'top') layer = 1000000;
     else if (chosenS && chosenS.kind === 'raise') layer += 1;
-    if (time < ev.start - 0.1 || time > ev.end + 0.1) continue;
-    const geom = eventCurrentGeometry(w, id, ev, time);
+    const geom = eventCurrentGeometry(hitWin, id, ev, time);
     if (!geom) continue;
     const b = geom.box;
-    const pad = Math.max(4, play.h * 0.012);
     const dx = x < b.x0 ? b.x0 - x : x > b.x1 ? x - b.x1 : 0;
     const dy = y < b.y0 ? b.y0 - y : y > b.y1 ? y - b.y1 : 0;
-    const dist = Math.hypot(dx, dy);
-    const key = layer * 1000000 + id;
-    if (dist === 0) {
-      // Higher layers draw on top; within a layer, later events win.
-      if (!best || key > best.key) best = { eventId: id, box: b, key };
-    } else if (dist <= pad * 2 && (!nearest || key > nearest.key || dist < nearest.dist)) {
-      // Forgiving grab: pick the nearest visible event when the click lands
-      // just outside its glyphs.
-      if (!nearest || dist < nearest.dist) nearest = { eventId: id, box: b, key, dist };
+    const distPx = Math.hypot(dx / pxX, dy / pxY);
+    const inWin = hitWin.id === w.id;
+    const ink = distPx !== 0 || coverageHit(eventCoverage(ev, time), b, x, y);
+    const cand = {
+      eventId: id, windowId: hitWin.id, layer, inWin, box: b,
+      distPx: Math.round(distPx * 10) / 10, ink,
+      source: ev.boxSamples && ev.boxSamples.length ? 'samples' : ev.exactBBox ? 'exact' : 'estimate',
+      transform: transformLabel(ev) || undefined,
+      role: ev.role, align: ev.align,
+    };
+    if (candidates.length < 40) candidates.push(cand);
+    // Inside the AABB but outside the ink (rotated corner or letter gap): do
+    // not claim the click for this event.
+    if (distPx === 0 && !ink) continue;
+    const winsTie = (cur) => inWin !== cur.inWin ? inWin
+      : layer !== cur.layer ? layer > cur.layer : id > cur.eventId;
+    if (distPx === 0) {
+      if (!best || winsTie(best)) best = { ...cand, key: layer * 1000000 + id };
+    } else if (distPx <= grabPx) {
+      if (!nearest || distPx < nearest.distPx ||
+          (distPx === nearest.distPx && winsTie(nearest))) {
+        nearest = { ...cand, key: layer * 1000000 + id };
+      }
     }
   }
-  return best || nearest;
+  const hit = best || nearest;
+  return hit ? { ...hit, candidates } : { miss: true, candidates };
 }
 
 function previewDragEventIds(w, hitId) {
@@ -1758,9 +1938,12 @@ function snapPreviewDrag(drag, dx, dy) {
     u.y1 = Math.max(u.y1, b.y1 + dy);
   }
   // Snap within ~6 screen pixels, not 6 PlayRes pixels: a 640x360 script on a
-  // 1080p video would otherwise feel sticky (18 video px).
-  const pxPerScript = drag.screenW > 0 && drag.playW > 0 ? drag.screenW / drag.playW : 1;
-  const threshold = 6 / (pxPerScript || 1);
+  // 1080p video would otherwise feel sticky (18 video px). Use each axis scale
+  // separately because letterboxed windows do not map x and y identically.
+  const pxPerScriptX = drag.screenW > 0 && drag.playW > 0 ? drag.screenW / drag.playW : 1;
+  const pxPerScriptY = drag.screenH > 0 && drag.playH > 0 ? drag.screenH / drag.playH : 1;
+  const thresholdX = 6 / (pxPerScriptX || 1);
+  const thresholdY = 6 / (pxPerScriptY || 1);
   const safeX0 = drag.playW * 0.05;
   const safeX1 = drag.playW * 0.95;
   const safeY0 = drag.playH * 0.05;
@@ -1785,7 +1968,7 @@ function snapPreviewDrag(drag, dx, dy) {
       }
     }
   }
-  const bestShift = (edges, targets) => {
+  const bestShift = (edges, targets, threshold) => {
     let best = 0;
     let bestAbs = Infinity;
     for (const e of edges) {
@@ -1799,8 +1982,8 @@ function snapPreviewDrag(drag, dx, dy) {
     }
     return best;
   };
-  dx += bestShift([u.x0, u.x1], xTargets);
-  dy += bestShift([u.y0, u.y1], yTargets);
+  dx += bestShift([u.x0, u.x1], xTargets, thresholdX);
+  dy += bestShift([u.y0, u.y1], yTargets, thresholdY);
   return { dx: Math.round(dx * 10) / 10, dy: Math.round(dy * 10) / 10 };
 }
 
@@ -2009,7 +2192,7 @@ function highlightPreviewSelection(w) {
 
 function handlePreviewDrag(p) {
   if (!p || !state.reviewWindow || !state.merged) return;
-  const w = state.reviewWindow;
+  let w = state.reviewWindow;
   const play = previewPlayRes();
   if (p.phase === 'down') {
     // mpv pauses on mousedown so the frame and hit-test geometry stay fixed.
@@ -2020,7 +2203,41 @@ function handlePreviewDrag(p) {
     const t = Number.isFinite(p.time)
       ? p.time
       : (state.playbackPos && Number.isFinite(state.playbackPos.time) ? state.playbackPos.time : w.peak);
-    const hit = hitTestPreviewEvent(w, p.nx, p.ny, t);
+    const hitResult = hitTestPreviewEvent(w, p.nx, p.ny, t, p.screenW, p.screenH);
+    const hit = hitResult && !hitResult.miss ? hitResult : null;
+    const candidates = hitResult ? hitResult.candidates : [];
+    const diag = {
+      time: Math.round(t * 1000) / 1000,
+      nx: p.nx, ny: p.ny,
+      scriptX: Number.isFinite(p.nx) ? Math.round(p.nx * play.w * 10) / 10 : null,
+      scriptY: Number.isFinite(p.ny) ? Math.round(p.ny * play.h * 10) / 10 : null,
+      playW: play.w, playH: play.h,
+      screenW: p.screenW, screenH: p.screenH,
+      osdW: p.osdW, osdH: p.osdH,
+      marginL: p.marginL, marginT: p.marginT,
+      mouseX: p.mouseX, mouseY: p.mouseY,
+      par: p.par,
+      windowId: w.id,
+      hit: hit ? {
+        eventId: hit.eventId, windowId: hit.windowId, inWindow: hit.inWin,
+        box: hit.box, distPx: hit.distPx, source: hit.source,
+        transform: hit.transform, role: hit.role, align: hit.align,
+      } : null,
+      candidates: candidates,
+    };
+    state.diagnostics.lastHit = diag;
+    uiLog('info', 'preview hit-test', diag);
+    if (hit && hit.windowId !== w.id) {
+      // The click landed on a subtitle that belongs to another review window.
+      // Switch the panel so the fix list matches the selection.
+      selectWindow(hit.windowId, false, false);
+      w = state.reviewWindow;
+      if (w) state.pausedWindow = w.id;
+      updatePlaybackButtons();
+      uiLog('info', 'preview hit switched review window', {
+        from: diag.windowId, to: w && w.id, eventId: hit.eventId,
+      });
+    }
     if (!hit) {
       state.selected = null;
       state.drag = null;
@@ -2048,8 +2265,15 @@ function handlePreviewDrag(p) {
       windowId: w.id, eventIds: ids, hitEvent: hit.eventId, mode: p.mode, time: t,
       boxes, playW: play.w, playH: play.h,
       screenW: p.screenW, screenH: p.screenH,
+      hitInfo: hit,
     };
     state.selected = { windowId: w.id, eventId: hit.eventId };
+    uiLog('info', 'preview selected event', {
+      eventId: hit.eventId, windowId: w.id, mode: p.mode, time: t,
+      box: hit.box, boxes: boxes.length, source: hit.source,
+      transform: hit.transform, role: hit.role, align: hit.align,
+      distancePx: hit.distPx, inWindow: hit.inWin,
+    });
     if (state.pendingBase) {
       state.bases[baseKey(w, hit.eventId)] = state.pendingBase;
       state.pendingBase = null;
@@ -2060,7 +2284,10 @@ function handlePreviewDrag(p) {
     const el = windowSuggestions.querySelector(`.event-fixes[data-event="${hit.eventId}"]`);
     if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
     if (S.dragBoxes) S.dragBoxes({ playW: play.w, playH: play.h, boxes });
-    setStatus(`selected #${hit.eventId}; drag to move` +
+    const tf = hit.transform ? `, transform ${hit.transform}` : '';
+    const src = hit.source !== 'exact' && hit.source !== 'samples'
+      ? ', estimated box' : '';
+    setStatus(`selected #${hit.eventId}${tf}${src}; drag to move` +
       (p.mode === 'axis' ? ', axis locked' : p.mode === 'fine' ? ', fine' : ''));
   } else if (p.phase === 'up') {
     const drag = state.drag;
@@ -2068,12 +2295,23 @@ function handlePreviewDrag(p) {
     if (!drag || drag.windowId !== w.id) return;
     let dx = Number(p.dx) || 0;
     let dy = Number(p.dy) || 0;
+    const raw = { dx, dy };
     if (Math.abs(dx) < 0.2 && Math.abs(dy) < 0.2) {
+      uiLog('info', 'preview drag ended below threshold', { ...raw, eventIds: drag.eventIds });
       setStatus(`selected #${drag.hitEvent}; drag to move, arrows to nudge`);
       return;
     }
     ({ dx, dy } = snapPreviewDrag(drag, dx, dy));
-    moveEventsBy(w, drag.eventIds, dx, dy, { source: 'drag' });
+    const moved = moveEventsBy(w, drag.eventIds, dx, dy, { source: 'drag' });
+    state.diagnostics.lastDrag = {
+      windowId: w.id, eventIds: drag.eventIds, hitEvent: drag.hitEvent,
+      rawDx: raw.dx, rawDy: raw.dy, dx, dy, moved,
+      playW: drag.playW, playH: drag.playH,
+      screenW: drag.screenW, screenH: drag.screenH,
+      source: drag.hitInfo && drag.hitInfo.source,
+      transform: drag.hitInfo && drag.hitInfo.transform,
+    };
+    uiLog('info', 'preview drag applied', state.diagnostics.lastDrag);
   } else if (p.phase === 'cancel') {
     state.drag = null;
     if (S.cancelDrag) S.cancelDrag();
@@ -2271,6 +2509,7 @@ function basePayload() {
     job: state.review && state.review.job,
     summary: state.review && state.review.summary,
     tracks: (state.review && state.review.tracks) || null,
+    diagnostics: state.diagnostics,
   };
 }
 

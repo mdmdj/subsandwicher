@@ -87,28 +87,58 @@ type Decision struct {
 	Surface    string  `json:"surface"`
 }
 
+// TransformInfo records the ASS transform tags that make the estimated box
+// approximate. The UI logs it so a mismatching preview box is easy to report.
+type TransformInfo struct {
+	RotX     float64 `json:"rotX,omitempty"`
+	RotY     float64 `json:"rotY,omitempty"`
+	RotZ     float64 `json:"rotZ,omitempty"`
+	SkewX    float64 `json:"skewX,omitempty"`
+	SkewY    float64 `json:"skewY,omitempty"`
+	Org      *Point  `json:"org,omitempty"`
+	Animated bool    `json:"animated,omitempty"`
+	Tags     string  `json:"tags,omitempty"`
+}
+
+// BoxSample is an exact ink box measured at a specific time. Animated
+// transforms need more than one sample because the glyph shape changes while
+// the event is on screen.
+type BoxSample struct {
+	Time     float64 `json:"time"`
+	Box      Box     `json:"box"`
+	Coverage string  `json:"coverage,omitempty"`
+}
+
 // EventDecision is the per-event log entry.
 type EventDecision struct {
-	ID         int        `json:"id"`
-	Track      string     `json:"track"`
-	Role       string     `json:"role"`
-	Style      string     `json:"style"`
-	Start      float64    `json:"start"`
-	End        float64    `json:"end"`
-	Text       string     `json:"text"`
-	Layer      int        `json:"layer"`
-	Align      int        `json:"align"`
-	Pos        *Point     `json:"pos,omitempty"`
-	Moving     bool       `json:"moving"`
-	BBox       Box        `json:"bbox"`
-	BBoxExact  bool       `json:"bboxExact"`
-	ExactBBox  *Box       `json:"exactBBox,omitempty"`
-	ExactSeek  float64    `json:"exactSeek,omitempty"`
-	Importance float64    `json:"importance"`
-	Level      int        `json:"level"`
-	LevelName  string     `json:"levelName"`
-	Surface    string     `json:"surface"`
-	Decisions  []Decision `json:"decisions"`
+	ID         int         `json:"id"`
+	Track      string      `json:"track"`
+	Role       string      `json:"role"`
+	Style      string      `json:"style"`
+	Start      float64     `json:"start"`
+	End        float64     `json:"end"`
+	Text       string      `json:"text"`
+	Layer      int         `json:"layer"`
+	Align      int         `json:"align"`
+	Pos        *Point      `json:"pos,omitempty"`
+	Moving     bool        `json:"moving"`
+	BBox       Box         `json:"bbox"`
+	BBoxExact  bool        `json:"bboxExact"`
+	ExactBBox  *Box        `json:"exactBBox,omitempty"`
+	ExactSeek  float64     `json:"exactSeek,omitempty"`
+	Coverage   string      `json:"coverage,omitempty"`
+	BoxSamples []BoxSample `json:"boxSamples,omitempty"`
+	// Margin* let the UI derive the same layout anchor libass uses for \pos
+	// without depending on the estimated text width.
+	MarginL    float64        `json:"marginL,omitempty"`
+	MarginR    float64        `json:"marginR,omitempty"`
+	MarginV    float64        `json:"marginV,omitempty"`
+	Transform  *TransformInfo `json:"transform,omitempty"`
+	Importance float64        `json:"importance"`
+	Level      int            `json:"level"`
+	LevelName  string         `json:"levelName"`
+	Surface    string         `json:"surface"`
+	Decisions  []Decision     `json:"decisions"`
 }
 
 // Conflict is one overlapping pair (or one off-safe-area event).
@@ -264,6 +294,8 @@ type plannedEvent struct {
 	exactBox   Box
 	exactSeek  float64
 	exactValid bool
+	exactCov   string
+	samples    []BoxSample
 }
 
 func (p *plannedEvent) add(d Decision) {
@@ -836,6 +868,16 @@ func buildReport(events []*plannedEvent, job JobInfo, playW, playH float64, exac
 			b := roundBox(ev.exactBox)
 			exactBox = &b
 		}
+		var marginL, marginR, marginV float64
+		var transform *TransformInfo
+		var samples []BoxSample
+		if ev.geom != nil {
+			marginL, marginR, marginV = ev.geom.marginL, ev.geom.marginR, ev.geom.marginV
+			transform = ev.geom.transformInfo()
+		}
+		if len(ev.samples) > 0 {
+			samples = ev.samples
+		}
 		rep.Events = append(rep.Events, EventDecision{
 			ID:         ev.order,
 			Track:      ev.track.String(),
@@ -852,6 +894,12 @@ func buildReport(events []*plannedEvent, job JobInfo, playW, playH float64, exac
 			BBoxExact:  false,
 			ExactBBox:  exactBox,
 			ExactSeek:  round2(ev.exactSeek),
+			Coverage:   ev.exactCov,
+			BoxSamples: samples,
+			MarginL:    round2(marginL),
+			MarginR:    round2(marginR),
+			MarginV:    round2(marginV),
+			Transform:  transform,
 			Importance: ev.importance,
 			Level:      lvl,
 			LevelName:  levelName(lvl),

@@ -1,6 +1,7 @@
 package sandwicher
 
 import (
+	"fmt"
 	"math"
 	"regexp"
 	"strconv"
@@ -133,6 +134,11 @@ var (
 	reFscxTag       = regexp.MustCompile(`\\fscx(-?[\d.]+)`)
 	reFscyTag       = regexp.MustCompile(`\\fscy(-?[\d.]+)`)
 	reFrzTag        = regexp.MustCompile(`\\f(?:rz|r)(-?[\d.]+)`)
+	reFrxTag        = regexp.MustCompile(`\\frx(-?[\d.]+)`)
+	reFryTag        = regexp.MustCompile(`\\fry(-?[\d.]+)`)
+	reFaxTag        = regexp.MustCompile(`\\fax(-?[\d.]+)`)
+	reFayTag        = regexp.MustCompile(`\\fay(-?[\d.]+)`)
+	reAnimatedTag   = regexp.MustCompile(`\\t\s*\(`)
 	reQTag          = regexp.MustCompile(`\\q(\d+)`)
 	reDrawingTag    = regexp.MustCompile(`\\p(\d+)`)
 
@@ -289,6 +295,11 @@ type eventGeom struct {
 	outline     float64
 	shadow      float64
 	angle       float64
+	rotX        float64
+	rotY        float64
+	skewX       float64
+	skewY       float64
+	animated    bool
 	pos         *Point
 	move        *Move
 	org         *Point
@@ -355,6 +366,11 @@ func measureEvent(d *Dialogue, st *ASSStyle, playW, playH float64) *eventGeom {
 		outline:  tagFloat(reBordTag, d.Text, styleFloat(st, "outline", 0)),
 		shadow:   tagFloat(reShadTag, d.Text, styleFloat(st, "shadow", 0)),
 		angle:    tagFloat(reFrzTag, d.Text, styleFloat(st, "angle", 0)),
+		rotX:     tagFloat(reFrxTag, d.Text, 0),
+		rotY:     tagFloat(reFryTag, d.Text, 0),
+		skewX:    tagFloat(reFaxTag, d.Text, 0),
+		skewY:    tagFloat(reFayTag, d.Text, 0),
+		animated: reAnimatedTag.MatchString(d.Text),
 		pos:      tagPoint(rePosTag, d.Text),
 		move:     tagMove(d.Text),
 		org:      tagPoint(reOrgTag, d.Text),
@@ -420,7 +436,10 @@ func (g *eventGeom) anchorAt(tSec, startSec, endSec float64) (x, y float64, anch
 	return 0, 0, false
 }
 
-func (g *eventGeom) boxAt(tSec, startSec, endSec, playW, playH float64) Box {
+// layoutBoxAt is the box libass would use before any rotation, shear, or 3D
+// transform. Position, alignment, margins, line wrapping, and inline scaling
+// are already folded into it.
+func (g *eventGeom) layoutBoxAt(tSec, startSec, endSec, playW, playH float64) Box {
 	w, h := g.width, g.height
 	var x0, y0 float64
 	if px, py, ok := g.anchorAt(tSec, startSec, endSec); ok {
@@ -458,39 +477,126 @@ func (g *eventGeom) boxAt(tSec, startSec, endSec, playW, playH float64) Box {
 			y0 = g.marginV
 		}
 	}
-	b := Box{X0: x0, Y0: y0, X1: x0 + w, Y1: y0 + h}
-	if g.angle == 0 {
+	return Box{X0: x0, Y0: y0, X1: x0 + w, Y1: y0 + h}
+}
+
+// layoutAnchorAt returns the alignment point libass uses for \pos. It is
+// computed from the untransformed layout box, so a rotated/skewed event still
+// reports the same anchor the renderer will place when a fix adds \pos.
+func (g *eventGeom) layoutAnchorAt(tSec, startSec, endSec, playW, playH float64) (Point, bool) {
+	b := g.layoutBoxAt(tSec, startSec, endSec, playW, playH)
+	if !b.Valid() {
+		return Point{}, false
+	}
+	return anchorForBox(b, g.align), true
+}
+
+func (g *eventGeom) hasTransform() bool {
+	return g.angle != 0 || g.rotX != 0 || g.rotY != 0 || g.skewX != 0 || g.skewY != 0
+}
+
+// transformInfo summarizes the tags that make the estimate diverge from what
+// libass draws, and whether \t can change the shape over the event's lifetime.
+func (g *eventGeom) transformInfo() *TransformInfo {
+	if g == nil || (!g.hasTransform() && g.org == nil && !g.animated) {
+		return nil
+	}
+	var tags []string
+	add := func(format string, v float64) {
+		if v != 0 {
+			tags = append(tags, fmt.Sprintf(format, v))
+		}
+	}
+	add(`\frx%g`, g.rotX)
+	add(`\fry%g`, g.rotY)
+	add(`\frz%g`, g.angle)
+	add(`\fax%g`, g.skewX)
+	add(`\fay%g`, g.skewY)
+	if g.org != nil {
+		tags = append(tags, fmt.Sprintf(`\org(%g,%g)`, g.org.X, g.org.Y))
+	}
+	if g.animated {
+		tags = append(tags, `\t(...)`)
+	}
+	if len(tags) == 0 {
+		return nil
+	}
+	return &TransformInfo{
+		RotX: g.rotX, RotY: g.rotY, RotZ: g.angle,
+		SkewX: g.skewX, SkewY: g.skewY,
+		Org: g.org, Animated: g.animated, Tags: strings.Join(tags, " "),
+	}
+}
+
+// transformCenter is the point libass transforms around. \org is absolute and
+// wins; otherwise the alignment anchor of the layout box is used.
+func (g *eventGeom) transformCenter(b Box) (float64, float64) {
+	if g.org != nil {
+		return g.org.X, g.org.Y
+	}
+	cx, cy := (b.X0+b.X1)/2, (b.Y0+b.Y1)/2
+	switch g.align % 3 {
+	case 1:
+		cx = b.X0
+	case 0:
+		cx = b.X1
+	}
+	switch {
+	case g.align <= 3:
+		cy = b.Y1
+	case g.align <= 6:
+		cy = (b.Y0 + b.Y1) / 2
+	default:
+		cy = b.Y0
+	}
+	return cx, cy
+}
+
+// projectPoint applies the same transform order libass documents: shear, then
+// Z rotation, then X/Y rotation with a pinhole perspective. This is an
+// approximation (per-glyph inline transforms are not modelled), but it keeps
+// the estimated box close for files without an exact ink mask.
+func projectPoint(dx, dy, cx, cy, skewX, skewY, angle, rotX, rotY, playH float64) (float64, float64) {
+	// Shear: x' = x + y*factor, y' = y + x*factor.
+	if skewX != 0 || skewY != 0 {
+		dx, dy = dx+dy*skewX, dy+dx*skewY
+	}
+	// \frz / \fr.
+	if angle != 0 {
+		rad := angle * math.Pi / 180
+		c, s := math.Cos(rad), math.Sin(rad)
+		dx, dy = dx*c-dy*s, dx*s+dy*c
+	}
+	if rotX != 0 || rotY != 0 {
+		// libass uses a fixed camera distance scaled from the script height.
+		cam := math.Max(1, playH) * (312.5 / 288.0)
+		rx := rotX * math.Pi / 180
+		ry := rotY * math.Pi / 180
+		sx, cxr := -math.Sin(rx), math.Cos(rx)
+		sy, cyr := math.Sin(ry), math.Cos(ry)
+		z3 := dy * sx
+		y3 := dy * cxr
+		x4 := dx*cyr - z3*sy
+		z4 := dx*sy + z3*cyr
+		zf := z4 + cam
+		if zf < 0.1 {
+			zf = 0.1
+		}
+		return cx + x4*cam/zf, cy + y3*cam/zf
+	}
+	return cx + dx, cy + dy
+}
+
+func (g *eventGeom) boxAt(tSec, startSec, endSec, playW, playH float64) Box {
+	b := g.layoutBoxAt(tSec, startSec, endSec, playW, playH)
+	if !g.hasTransform() {
 		return b
 	}
-
-	// Rotate the box around \org when present, else the alignment anchor.
-	cx, cy := (b.X0+b.X1)/2, (b.Y0+b.Y1)/2
-	if g.org != nil {
-		cx, cy = g.org.X, g.org.Y
-	} else {
-		switch g.align % 3 {
-		case 1:
-			cx = b.X0
-		case 0:
-			cx = b.X1
-		}
-		switch {
-		case g.align <= 3:
-			cy = b.Y1
-		case g.align <= 6:
-			cy = (b.Y0 + b.Y1) / 2
-		default:
-			cy = b.Y0
-		}
-	}
-	rad := g.angle * math.Pi / 180
-	cos, sin := math.Cos(rad), math.Sin(rad)
+	cx, cy := g.transformCenter(b)
 	corners := [][2]float64{{b.X0, b.Y0}, {b.X1, b.Y0}, {b.X1, b.Y1}, {b.X0, b.Y1}}
 	out := Box{X0: math.Inf(1), Y0: math.Inf(1), X1: math.Inf(-1), Y1: math.Inf(-1)}
 	for _, c := range corners {
-		dx, dy := c[0]-cx, c[1]-cy
-		rx := cx + dx*cos - dy*sin
-		ry := cy + dx*sin + dy*cos
+		rx, ry := projectPoint(c[0]-cx, c[1]-cy, cx, cy, g.skewX, g.skewY, g.angle, g.rotX, g.rotY, playH)
 		out.X0 = math.Min(out.X0, rx)
 		out.Y0 = math.Min(out.Y0, ry)
 		out.X1 = math.Max(out.X1, rx)
