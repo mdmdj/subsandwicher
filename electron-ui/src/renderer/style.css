@@ -23,6 +23,20 @@ body {
   border-color: #99f;
 }
 .hidden { display: none; }
+.app-version {
+  position: fixed;
+  right: 10px;
+  bottom: 7px;
+  z-index: 2000;
+  pointer-events: none;
+  font-size: 11px;
+  color: #8890a8;
+  background: rgba(30, 30, 47, 0.82);
+  border: 1px solid #3a3a55;
+  border-radius: 6px;
+  padding: 2px 7px;
+  font-variant-numeric: tabular-nums;
+}
 #actions { padding: 0 16px 16px; display: flex; flex-wrap: wrap; gap: 16px; flex: 1; align-content: flex-start; }
 .streamlist { flex: 1 1 320px; max-height: 44vh; overflow-y: auto; border: 1px solid #444; border-radius: 8px; padding: 8px 12px; }
 .streamlist h2 { font-size: 15px; margin: 4px 0 10px; color: #99c; }

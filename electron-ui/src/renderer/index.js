@@ -34,6 +34,17 @@ let state = {
 
 const sel = (s) => document.querySelector(s);
 const S = window.subsandwicher;
+const appVersionBadge = sel('#app-version');
+
+function renderAppVersion() {
+  if (!appVersionBadge) return;
+  const m = state.appMeta || {};
+  const version = m.version || 'dev';
+  const commit = m.commit ? ` · ${m.commit}` : '';
+  const build = m.buildTime ? ` · built ${m.buildTime}` : '';
+  appVersionBadge.textContent = `SubSandwicher v${version}${commit}`;
+  appVersionBadge.title = `SubSandwicher ${version}${commit}${build}`;
+}
 
 const dropzone = sel('#dropzone');
 const dropstatus = sel('#dropstatus');
@@ -148,6 +159,7 @@ function signed(n) {
 
 (async () => {
   try { state.appMeta = await S.getAppMeta(); } catch (e) { console.warn('app meta failed', e); }
+  renderAppVersion();
 })();
 
 // ---------- drag & drop ----------

@@ -7,6 +7,11 @@ go build ./... && go test ./...        # go core + tests
 bash tools/build-windows.sh            # full Windows dist + zip in dist/
 ```
 
+The Windows build injects an auto-incrementing version into the staged
+`package.json`: `0.1.<git commit count>` plus the short commit. The UI shows it
+in the bottom-right badge and window title, and logs it at startup. A build from
+a dirty tree gets a `-dirty` suffix.
+
 Dev-run the GUI from source (needs `electron-ui/node_modules`):
 
 ```sh

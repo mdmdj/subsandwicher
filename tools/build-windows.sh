@@ -38,6 +38,31 @@ mkdir -p "$STAGE/resources/app"
 cp -r "$EUI/src" "$STAGE/resources/app/src"
 cp "$EUI/package.json" "$STAGE/resources/app/package.json"
 
+# Build number = commit count, so the UI reports a version that increments with
+# every commit and matches the source revision. A dirty tree is marked so a
+# package built from uncommitted code cannot be mistaken for a clean release.
+COMMITS="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 0)"
+COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BUILD_VERSION="0.1.${COMMITS}"
+if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+  BUILD_VERSION="${BUILD_VERSION}-dirty"
+fi
+BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+python3 - "$STAGE/resources/app/package.json" "$BUILD_VERSION" "$COMMITS" "$COMMIT" "$BUILD_TIME" <<'PY'
+import json, sys
+path, version, number, commit, built = sys.argv[1:6]
+with open(path) as f:
+    pkg = json.load(f)
+pkg["version"] = version
+pkg["buildNumber"] = int(number)
+pkg["buildCommit"] = commit
+pkg["buildTime"] = built
+with open(path, "w") as f:
+    json.dump(pkg, f, indent=2)
+    f.write("\n")
+print(f"    version {version} ({commit}) built {built}")
+PY
+
 echo "==> vendoring media binaries"
 mkdir -p "$STAGE/resources/app/third_party/bin/windows"
 bash "$ROOT/tools/fetch-windows-bins.sh"   # no-op when already present

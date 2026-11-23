@@ -19,6 +19,17 @@ let playbackTickBusy = false;
 
 const dragScriptPath = path.join(__dirname, 'mpv-drag.lua');
 
+function appBuildInfo() {
+  const info = { version: app.getVersion(), commit: null, buildNumber: null, buildTime: null };
+  try {
+    const pkg = require(path.join(__dirname, '..', 'package.json'));
+    if (pkg && pkg.buildCommit) info.commit = String(pkg.buildCommit);
+    if (pkg && Number.isFinite(Number(pkg.buildNumber))) info.buildNumber = Number(pkg.buildNumber);
+    if (pkg && pkg.buildTime) info.buildTime = String(pkg.buildTime);
+  } catch { /* dev tree without injected build metadata */ }
+  return info;
+}
+
 function ensureWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
   mainWindow = new BrowserWindow({
@@ -34,7 +45,7 @@ function ensureWindow() {
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow.setTitle('SubSandwicher');
   mainWindow.webContents.on('did-finish-load', () => {
-    if (mainWindow) mainWindow.setTitle(`SubSandwicher — logs: ${logPath()}`);
+    if (mainWindow) mainWindow.setTitle(`SubSandwicher v${app.getVersion()} — logs: ${logPath()}`);
   });
   return mainWindow;
 }
@@ -357,7 +368,7 @@ async function applyPreviewFixes(fixes, seekTo, keepPlaying) {
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null); // no menu bar; not relevant to our flow
   initLog(app.getPath('userData'));
-  log('info', 'app starting', { appVersion: app.getVersion(), electron: process.versions.electron, node: process.versions.node });
+  log('info', 'app starting', { ...appBuildInfo(), electron: process.versions.electron, node: process.versions.node });
   resolveBinaries();
   ensureWindow();
 
@@ -649,7 +660,7 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle('get-app-meta', () => ({
-    version: app.getVersion(),
+    ...appBuildInfo(),
     electron: process.versions.electron,
     node: process.versions.node,
     platform: process.platform,
@@ -743,7 +754,7 @@ async function saveMerged(payload) {
         version: 1,
         createdAt: new Date().toISOString(),
         app: {
-          version: app.getVersion(),
+          ...appBuildInfo(),
           electron: process.versions.electron,
           node: process.versions.node,
           platform: process.platform,
