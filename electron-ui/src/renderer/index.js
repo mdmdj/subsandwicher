@@ -30,6 +30,7 @@ let state = {
   langsCollapsed: false,
   probing: false,
   diagnostics: {}, // last preview hit/drag/OSD geometry, copied with review state
+  lastPreviewTime: null, // last frame used for a preview click, for box warming
 };
 
 const sel = (s) => document.querySelector(s);
@@ -782,7 +783,10 @@ async function seekToWindow(w) {
       mergedPath: state.merged.out,
       time: w.peak,
     });
-    if (res && res.ok) setStatus(`previewing window ${w.id} at ${fmtClock(w.peak)}`);
+    if (res && res.ok) {
+      state.lastPreviewTime = w.peak;
+      setStatus(`previewing window ${w.id} at ${fmtClock(w.peak)}`);
+    }
     else setStatus('preview seek failed: ' + ((res && res.error) || 'see logs'), true);
   } catch (e) {
     setStatus('preview seek failed: ' + e.message, true);
@@ -838,6 +842,12 @@ async function applyPreviewTo(seekTo, forceStop = false) {
       }
       updateAppliedIndicators(res);
       if (state.reviewWindow) refreshAppliedIndicators(state.reviewWindow);
+      // Warm the boxes for the frame we are paused on, so the next mouse-down
+      // does not wait for the CLI/libass render.
+      if (S.previewBoxes) {
+        const warm = Number.isFinite(target) ? target : state.lastPreviewTime;
+        if (Number.isFinite(warm)) S.previewBoxes({ time: warm }).catch(() => {});
+      }
       const warned = Object.keys(state.fixWarnings).length;
       const remaining = state.recheck.length;
       let extra = '';
@@ -901,6 +911,7 @@ function updateWindowProgress(pos) {
   windowProgressFill.style.width = pct.toFixed(1) + '%';
   windowProgress.setAttribute('aria-valuenow', String(Math.round(pct)));
   state.playbackPos = { ...pos };
+  state.lastPreviewTime = pos.time;
 }
 
 function resetWindowProgress() {
@@ -2281,6 +2292,29 @@ async function handlePreviewDragNow(p) {
     const t = Number.isFinite(p.time)
       ? p.time
       : (state.playbackPos && Number.isFinite(state.playbackPos.time) ? state.playbackPos.time : w.peak);
+    state.lastPreviewTime = t;
+    // Immediate feedback from the stored boxes while the live libass render
+    // runs. The final drag still uses the live boxes (the mouse-up is queued).
+    const provisional = hitTestPreviewEvent(w, p.nx, p.ny, t, p.screenW, p.screenH, null);
+    const provisionalHit = provisional && !provisional.miss ? provisional : null;
+    if (provisionalHit) {
+      const pids = previewDragEventIds(w, provisionalHit.eventId);
+      const pboxes = previewDragBoxes(w, pids, t);
+      state.selected = { windowId: w.id, eventId: provisionalHit.eventId };
+      state.drag = {
+        windowId: w.id, eventIds: pids, hitEvent: provisionalHit.eventId, mode: p.mode, time: t,
+        boxes: pboxes, playW: play.w, playH: play.h,
+        screenW: p.screenW, screenH: p.screenH,
+        hitInfo: provisionalHit, liveById: null, provisional: true,
+      };
+      highlightPreviewSelection(w);
+      if (S.dragBoxes) S.dragBoxes({ playW: play.w, playH: play.h, boxes: pboxes });
+      setStatus(`selected #${provisionalHit.eventId}; measuring the exact box…`);
+      uiLog('info', 'preview provisional hit', {
+        eventId: provisionalHit.eventId, box: provisionalHit.box,
+        source: provisionalHit.source, text: provisionalHit.text,
+      });
+    }
     // Ask the CLI for the real boxes at this frame. Merge-time exact boxes are
     // rendered per event and miss libass collision stacking (and fades/effects).
     let liveById = null;

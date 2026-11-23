@@ -39,6 +39,8 @@ type exactContext struct {
 	// preserveTargetOpacity keeps the target's fade/alpha, so an invisible event
 	// produces no ink. Merge-time masks strip opacity to measure shape.
 	preserveTargetOpacity bool
+	// coordScale converts render pixels back to script/PlayRes units.
+	coordScale float64
 }
 
 // inkMask is a downsampled alpha coverage mask plus the exact pixel bbox.
@@ -67,7 +69,23 @@ func newExactContext(assPath string, playW, playH float64) *exactContext {
 }
 
 func newPreviewExactContext(assPath string, playW, playH float64) *exactContext {
-	return newExactContextOpts(assPath, playW, playH, true, true)
+	// Preview hit boxes do not need full video resolution. Rendering at about
+	// 960x540 is several times faster and stays well within a few script pixels.
+	scale := 1.0
+	if playW > 960 {
+		scale = math.Min(scale, 960/playW)
+	}
+	if playH > 540 {
+		scale = math.Min(scale, 540/playH)
+	}
+	if scale < 0.25 {
+		scale = 0.25
+	}
+	ex := newExactContextOpts(assPath, math.Round(playW*scale), math.Round(playH*scale), true, true)
+	if ex != nil {
+		ex.coordScale = 1 / scale
+	}
+	return ex
 }
 
 func newExactContextOpts(assPath string, playW, playH float64, includeActive, preserveOpacity bool) *exactContext {
@@ -96,6 +114,7 @@ func newExactContextOpts(assPath string, playW, playH float64, includeActive, pr
 		sem:                   make(chan struct{}, 4),
 		includeActive:         includeActive,
 		preserveTargetOpacity: preserveOpacity,
+		coordScale:            1,
 	}
 }
 
@@ -569,12 +588,20 @@ func PreviewBoxes(assPath string, time float64) ([]PreviewBox, error) {
 	}
 	masks := ex.masksAt(ids, time)
 	out := make([]PreviewBox, 0, len(ids))
+	s := ex.coordScale
+	if s <= 0 {
+		s = 1
+	}
 	for _, id := range ids {
 		m := masks[id]
 		if m == nil || !m.Box.Valid() {
 			continue
 		}
-		out = append(out, PreviewBox{ID: id, Box: roundBox(m.Box), Coverage: m.Coverage})
+		b := m.Box
+		if s != 1 {
+			b = Box{X0: b.X0 * s, Y0: b.Y0 * s, X1: b.X1 * s, Y1: b.Y1 * s}
+		}
+		out = append(out, PreviewBox{ID: id, Box: roundBox(b), Coverage: m.Coverage})
 	}
 	return out, nil
 }

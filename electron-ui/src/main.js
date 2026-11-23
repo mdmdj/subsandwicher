@@ -12,6 +12,7 @@ let activeSession = null;
 let tempDir = null;
 let previewCtx = null; // { videoPath, mergedPath } for auto-relaunch after mpv death
 const previewBoxCache = new Map(); // path|mtime|time -> current libass boxes
+const previewBoxInflight = new Map(); // same key -> in-flight promise
 let activeMergeProcess = null; // cli process for the running merge
 let playbackTimer = null; // pauses a non-looping window at its end
 let playbackClock = null; // polls mpv time-pos while a conflict window plays
@@ -236,15 +237,24 @@ async function previewBoxesAt(time) {
   }
   const key = `${p}|${stamp}|${time.toFixed(3)}`;
   if (previewBoxCache.has(key)) return previewBoxCache.get(key);
-  const res = await runCli(['boxes', `--ass=${p}`, `--time=${time}`], {});
-  const boxes = Array.isArray(res.boxes) ? res.boxes : [];
-  log('info', 'preview boxes at', time, { count: boxes.length, ids: boxes.map(b => b.id) });
-  previewBoxCache.set(key, boxes);
-  if (previewBoxCache.size > 40) {
-    const first = previewBoxCache.keys().next().value;
-    previewBoxCache.delete(first);
+  if (previewBoxInflight.has(key)) return previewBoxInflight.get(key);
+  const work = (async () => {
+    const res = await runCli(['boxes', `--ass=${p}`, `--time=${time}`], {});
+    const boxes = Array.isArray(res.boxes) ? res.boxes : [];
+    log('info', 'preview boxes at', time, { count: boxes.length, ids: boxes.map(b => b.id) });
+    previewBoxCache.set(key, boxes);
+    if (previewBoxCache.size > 40) {
+      const first = previewBoxCache.keys().next().value;
+      previewBoxCache.delete(first);
+    }
+    return boxes;
+  })();
+  previewBoxInflight.set(key, work);
+  try {
+    return await work;
+  } finally {
+    previewBoxInflight.delete(key);
   }
-  return boxes;
 }
 
 function handleMpvClientMessage(args) {
@@ -514,6 +524,8 @@ app.whenReady().then(() => {
     try {
       await stopPlayback();
       await ensurePreviewAt(videoPath, mergedPath, time);
+      // Warm hit-test boxes for the paused frame.
+      previewBoxesAt(Number(time)).catch((e) => log('warn', 'preview box warmup failed', e.message));
       return { ok: true, time };
     } catch (e) {
       log('error', 'seek preview failed', e.message);
@@ -607,6 +619,12 @@ app.whenReady().then(() => {
         // Hold the current frame; no seek, so fix previews can reload subtitles
         // against the exact image the user is looking at.
         await stopPlayback();
+        // Warm the hit-test boxes so the next click does not wait for libass.
+        if (activeSession && !activeSession.isDead()) {
+          activeSession.getProperty('time-pos')
+            .then((t) => (typeof t === 'number' ? previewBoxesAt(t) : null))
+            .catch((e) => log('warn', 'preview box warmup failed', e.message));
+        }
         return { ok: true };
       }
       if (!activeSession || activeSession.isDead()) {
