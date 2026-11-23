@@ -32,6 +32,13 @@ type exactContext struct {
 	rendered     int
 	progress     func(rendered int)
 	lastProgress time.Time
+	// includeActive renders every event that is on screen at the seek. libass
+	// uses those events for collision stacking, so a sign rendered alone sits at
+	// the margin instead of where it is actually drawn.
+	includeActive bool
+	// preserveTargetOpacity keeps the target's fade/alpha, so an invisible event
+	// produces no ink. Merge-time masks strip opacity to measure shape.
+	preserveTargetOpacity bool
 }
 
 // inkMask is a downsampled alpha coverage mask plus the exact pixel bbox.
@@ -56,6 +63,14 @@ const (
 )
 
 func newExactContext(assPath string, playW, playH float64) *exactContext {
+	return newExactContextOpts(assPath, playW, playH, false, false)
+}
+
+func newPreviewExactContext(assPath string, playW, playH float64) *exactContext {
+	return newExactContextOpts(assPath, playW, playH, true, true)
+}
+
+func newExactContextOpts(assPath string, playW, playH float64, includeActive, preserveOpacity bool) *exactContext {
 	doc, err := parseASSFile(assPath)
 	if err != nil {
 		return nil
@@ -71,14 +86,16 @@ func newExactContext(assPath string, playW, playH float64) *exactContext {
 		return nil
 	}
 	return &exactContext{
-		doc:    doc,
-		playW:  playW,
-		playH:  playH,
-		ffmpeg: ff,
-		dir:    dir,
-		cache:  map[string]*inkMask{},
-		failed: map[string]bool{},
-		sem:    make(chan struct{}, 4),
+		doc:                   doc,
+		playW:                 playW,
+		playH:                 playH,
+		ffmpeg:                ff,
+		dir:                   dir,
+		cache:                 map[string]*inkMask{},
+		failed:                map[string]bool{},
+		sem:                   make(chan struct{}, 4),
+		includeActive:         includeActive,
+		preserveTargetOpacity: preserveOpacity,
 	}
 }
 
@@ -179,18 +196,7 @@ func (e *exactContext) renderEvent(eventID int, seek float64) (*inkMask, error) 
 	if eventID < 0 || eventID >= len(e.doc.Dialogues) {
 		return nil, fmt.Errorf("event %d out of range", eventID)
 	}
-	src := e.doc.Dialogues[eventID]
-	start := float64(src.startCS) / 100
-	end := float64(parseTimeCS(src.End)) / 100
-	dur := math.Max(1.0, end-start)
-	rel := math.Max(0.05, math.Min(seek-start, dur-0.05))
-
-	copyD := *src
-	copyD.Start = "0:00:00.00"
-	copyD.End = formatCS(dur)
-	copyD.startCS = 0
-	copyD.Text = stripOpacityTags(copyD.Text)
-	doc := &ASSDoc{InfoRaw: e.doc.InfoRaw, Info: e.doc.Info, Styles: e.doc.Styles, Dialogues: []*Dialogue{&copyD}, Other: e.doc.Other}
+	dur, rel, doc := e.renderDocFor(eventID, seek)
 
 	n := eventID
 	assName := fmt.Sprintf("e%d-%03d.ass", n, int(math.Round(rel*100)))
@@ -219,6 +225,90 @@ func (e *exactContext) renderEvent(eventID int, seek float64) (*inkMask, error) 
 	defer os.Remove(filepath.Join(e.dir, pngName))
 
 	return readInkMask(filepath.Join(e.dir, pngName))
+}
+
+// renderDocFor builds the temporary document used for one event mask. In
+// preview mode every event on screen is included so libass collision stacking
+// picks the same vertical position as the real frame; other events are made
+// transparent so only the target contributes ink.
+func (e *exactContext) renderDocFor(eventID int, seek float64) (dur, rel float64, doc *ASSDoc) {
+	src := e.doc.Dialogues[eventID]
+	if !e.includeActive {
+		start := float64(src.startCS) / 100
+		end := float64(parseTimeCS(src.End)) / 100
+		dur = math.Max(1.0, end-start)
+		rel = math.Max(0.05, math.Min(seek-start, dur-0.05))
+		cp := *src
+		cp.Start = "0:00:00.00"
+		cp.End = formatCS(dur)
+		cp.startCS = 0
+		cp.Text = stripOpacityTags(cp.Text)
+		return dur, rel, &ASSDoc{InfoRaw: e.doc.InfoRaw, Info: e.doc.Info, Styles: e.doc.Styles, Dialogues: []*Dialogue{&cp}, Other: e.doc.Other}
+	}
+
+	type activeEvent struct {
+		d          *Dialogue
+		start, end float64
+	}
+	active := make([]activeEvent, 0, 16)
+	base := math.Inf(1)
+	maxEnd := 0.0
+	for _, d := range e.doc.Dialogues {
+		start := float64(d.startCS) / 100
+		end := float64(parseTimeCS(d.End)) / 100
+		if seek < start-0.01 || seek > end+0.01 {
+			continue
+		}
+		active = append(active, activeEvent{d: d, start: start, end: end})
+		if start < base {
+			base = start
+		}
+		if end > maxEnd {
+			maxEnd = end
+		}
+	}
+	if math.IsInf(base, 1) {
+		start := float64(src.startCS) / 100
+		end := float64(parseTimeCS(src.End)) / 100
+		base = start
+		maxEnd = end
+		active = append(active, activeEvent{d: src, start: start, end: end})
+	}
+	dur = math.Max(1.0, maxEnd-base)
+	rel = math.Max(0.02, math.Min(seek-base, dur-0.02))
+
+	dialogues := make([]*Dialogue, 0, len(active))
+	targetFound := false
+	for _, a := range active {
+		cp := *a.d
+		cp.Start = formatCS(a.start - base)
+		cp.End = formatCS(a.end - base)
+		cp.startCS = int(math.Round((a.start - base) * 100))
+		if cp.startCS < 0 {
+			cp.startCS = 0
+		}
+		if a.d == src {
+			targetFound = true
+			if !e.preserveTargetOpacity {
+				cp.Text = stripOpacityTags(cp.Text)
+			}
+		} else {
+			// Keep the event in layout (collision stacking) but hide its ink.
+			cp.Text = "{\\alpha&HFF&}" + stripOpacityTags(cp.Text)
+		}
+		dialogues = append(dialogues, &cp)
+	}
+	if !targetFound {
+		start := float64(src.startCS) / 100
+		end := float64(parseTimeCS(src.End)) / 100
+		cp := *src
+		cp.Start = formatCS(start - base)
+		cp.End = formatCS(end - base)
+		cp.startCS = int(math.Round((start - base) * 100))
+		cp.Text = stripOpacityTags(cp.Text)
+		dialogues = append(dialogues, &cp)
+	}
+	return dur, rel, &ASSDoc{InfoRaw: e.doc.InfoRaw, Info: e.doc.Info, Styles: e.doc.Styles, Dialogues: dialogues, Other: e.doc.Other}
 }
 
 func readInkMask(path string) (*inkMask, error) {
@@ -442,6 +532,51 @@ func (e *exactContext) samplesFor(ev *plannedEvent, primarySeek float64, primary
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Time < out[j].Time })
 	return out
+}
+
+// PreviewBox is one current-frame event box for preview hit-testing.
+type PreviewBox struct {
+	ID       int    `json:"id"`
+	Box      Box    `json:"box"`
+	Coverage string `json:"coverage,omitempty"`
+}
+
+// PreviewBoxes renders the events visible at time in the given .ass and returns
+// their libass-correct boxes. Unlike the merge-time masks these include
+// collision stacking with other events, fades/alpha, and Effect-column motion.
+func PreviewBoxes(assPath string, time float64) ([]PreviewBox, error) {
+	doc, err := parseASSFile(assPath)
+	if err != nil {
+		return nil, err
+	}
+	playW, playH := playRes(doc)
+	ex := newPreviewExactContext(assPath, playW, playH)
+	if ex == nil {
+		return nil, fmt.Errorf("exact preview rendering is unavailable")
+	}
+	defer ex.close()
+
+	var ids []int
+	for i, d := range doc.Dialogues {
+		start := float64(d.startCS) / 100
+		end := float64(parseTimeCS(d.End)) / 100
+		if time >= start-0.01 && time <= end+0.01 {
+			ids = append(ids, i)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	masks := ex.masksAt(ids, time)
+	out := make([]PreviewBox, 0, len(ids))
+	for _, id := range ids {
+		m := masks[id]
+		if m == nil || !m.Box.Valid() {
+			continue
+		}
+		out = append(out, PreviewBox{ID: id, Box: roundBox(m.Box), Coverage: m.Coverage})
+	}
+	return out, nil
 }
 
 // exactSummary is used to report whether masks were actually produced.

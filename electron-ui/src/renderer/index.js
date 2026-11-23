@@ -1457,13 +1457,17 @@ function moveEventsBy(w, eventIds, dx, dy, opts = {}) {
     const key = editKey(w, eventId);
     const stored = state.edits[key];
     const baseBox = eventBaseBox(ev, ev.exactSeek, false);
+    const live = opts.liveBoxes && opts.liveBoxes.get(eventId);
+    const play = previewPlayRes();
     let edit;
     if (!hadChosen) {
       // No chosen candidate yet: move from the event's current/original
       // position, not from the candidate's own offset.
       if (!ev.moving) {
-        if (!baseBox && !ev.pos) { skipped++; continue; }
-        const origAnchor = eventAnchorJS(ev, baseBox, previewPlayRes());
+        if ((!baseBox && !ev.pos) || (live && !live.box)) { skipped++; continue; }
+        const origAnchor = live
+          ? eventAnchorJS(ev, live.box, play, true)
+          : eventAnchorJS(ev, baseBox, play);
         edit = {
           suggestionId: base.id,
           kind: base.s.kind,
@@ -1490,6 +1494,20 @@ function moveEventsBy(w, eventIds, dx, dy, opts = {}) {
       edit = stored && stored.suggestionId === base.id
         ? { ...stored, at: stored.at ? { ...stored.at } : null }
         : editBase(base.id, base.s);
+      // A candidate's `at` was computed from the layout margin. If libass has
+      // collision-stacked the event, shift the first drag by that offset so it
+      // does not jump to the margin.
+      if (live && live.box && base.s.at && !edit.posTouched) {
+        const liveAnchor = eventAnchorJS(ev, live.box, play, true);
+        const layoutAnchor = eventAnchorJS(ev, baseBox, play);
+        edit.at = {
+          x: Number(base.s.at.x) + (liveAnchor.x - layoutAnchor.x),
+          y: Number(base.s.at.y) + (liveAnchor.y - layoutAnchor.y),
+        };
+        edit.posTouched = true;
+        edit.dx = Number(base.s.dx) || 0;
+        edit.dy = Number(base.s.dy) || 0;
+      }
       if (base.s.kind === 'top' || base.s.kind === 'raise') {
         // Draw-order fixes have no intrinsic position, but a drag can add one
         // while preserving the layer change.
@@ -1499,10 +1517,10 @@ function moveEventsBy(w, eventIds, dx, dy, opts = {}) {
           edit.at = null;
           edit.posTouched = false;
         } else {
-          if (!baseBox && !ev.pos) { skipped++; continue; }
-          const origAnchor = ev.pos
-            ? { x: Number(ev.pos.x), y: Number(ev.pos.y) }
-            : anchorForBoxJS(baseBox, ev.align);
+          if ((!baseBox && !ev.pos) || (live && !live.box)) { skipped++; continue; }
+          const origAnchor = live
+            ? eventAnchorJS(ev, live.box, play, true)
+            : eventAnchorJS(ev, baseBox, play);
           const curAt = edit.posTouched && edit.at
             ? { x: Number(edit.at.x), y: Number(edit.at.y) }
             : { x: origAnchor.x + (Number(edit.dx) || 0), y: origAnchor.y + (Number(edit.dy) || 0) };
@@ -1707,10 +1725,11 @@ function coverageHit(cov, box, x, y) {
 
 // The alignment anchor libass uses for \pos. Margin-based anchors are exact for
 // events without \pos, so a first drag does not jump to an estimated centre.
-function eventAnchorJS(ev, box, play) {
+function eventAnchorJS(ev, box, play, preferBox = false) {
   if (ev.pos && Number.isFinite(Number(ev.pos.x)) && Number.isFinite(Number(ev.pos.y))) {
     return { x: Number(ev.pos.x), y: Number(ev.pos.y) };
   }
+  if (preferBox && box) return anchorForBoxJS(box, ev.align);
   const a = Number(ev.align) || 2;
   if (Number.isFinite(Number(ev.marginL)) && play && play.w > 0 && play.h > 0) {
     const ml = Number(ev.marginL) || 0;
@@ -1877,7 +1896,7 @@ function eventWindowIndex() {
   return map;
 }
 
-function hitTestPreviewEvent(w, nx, ny, time, screenW, screenH) {
+function hitTestPreviewEvent(w, nx, ny, time, screenW, screenH, liveById) {
   if (!Number.isFinite(nx) || !Number.isFinite(ny) || !Number.isFinite(time)) return null;
   const play = previewPlayRes();
   const x = nx * play.w;
@@ -1905,18 +1924,21 @@ function hitTestPreviewEvent(w, nx, ny, time, screenW, screenH) {
     let layer = Number(ev.layer) || 0;
     if (chosenS && chosenS.kind === 'top') layer = 1000000;
     else if (chosenS && chosenS.kind === 'raise') layer += 1;
-    const geom = eventCurrentGeometry(hitWin, id, ev, time);
+    const live = liveById ? liveById.get(id) : null;
+    if (liveById && !live) continue;
+    const geom = live ? { box: live.box } : eventCurrentGeometry(hitWin, id, ev, time);
     if (!geom) continue;
     const b = geom.box;
     const dx = x < b.x0 ? b.x0 - x : x > b.x1 ? x - b.x1 : 0;
     const dy = y < b.y0 ? b.y0 - y : y > b.y1 ? y - b.y1 : 0;
     const distPx = Math.hypot(dx / pxX, dy / pxY);
     const inWin = hitWin.id === w.id;
-    const ink = distPx !== 0 || coverageHit(eventCoverage(ev, time), b, x, y);
+    const cov = live ? live.coverage : eventCoverage(ev, time);
+    const ink = distPx !== 0 || coverageHit(cov, b, x, y);
     const cand = {
       eventId: id, windowId: hitWin.id, layer, inWin, box: b,
       distPx: Math.round(distPx * 10) / 10, ink,
-      source: eventBoxSource(ev, time),
+      source: live ? 'live' : eventBoxSource(ev, time),
       transform: transformLabel(ev) || undefined,
       moving: !!ev.moving,
       effect: ev.effect || undefined,
@@ -1949,10 +1971,15 @@ function previewDragEventIds(w, hitId) {
   return [hitId];
 }
 
-function previewDragBoxes(w, ids, time) {
+function previewDragBoxes(w, ids, time, liveById) {
   const map = reviewEvents();
   const out = [];
   for (const id of ids) {
+    if (liveById) {
+      const live = liveById.get(id);
+      if (live) out.push(live.box);
+      continue;
+    }
     const ev = map.get(id);
     if (!ev) continue;
     const geom = eventCurrentGeometry(w, id, ev, time);
@@ -1999,7 +2026,9 @@ function snapPreviewDrag(drag, dx, dy) {
         const ev = map.get(id);
         if (!ev) continue;
         if (drag.time < ev.start - 0.1 || drag.time > ev.end + 0.1) continue;
-        const geom = eventCurrentGeometry(w, id, ev, drag.time);
+        const geom = drag.liveById && drag.liveById.get(id)
+          ? { box: drag.liveById.get(id).box }
+          : eventCurrentGeometry(w, id, ev, drag.time);
         if (!geom) continue;
         xTargets.push(geom.box.x0, geom.box.x1);
         yTargets.push(geom.box.y0, geom.box.y1);
@@ -2228,7 +2257,18 @@ function highlightPreviewSelection(w) {
   }
 }
 
+let previewDragQueue = Promise.resolve();
+
+// Drag messages must stay ordered. The down handler waits for fresh boxes from
+// the CLI; queue any up/cancel that arrives while that request is in flight.
 function handlePreviewDrag(p) {
+  previewDragQueue = previewDragQueue
+    .then(() => handlePreviewDragNow(p))
+    .catch((e) => uiLog('error', 'preview drag handler failed', { error: e.message }));
+  return previewDragQueue;
+}
+
+async function handlePreviewDragNow(p) {
   if (!p || !state.reviewWindow || !state.merged) return;
   let w = state.reviewWindow;
   const play = previewPlayRes();
@@ -2241,7 +2281,23 @@ function handlePreviewDrag(p) {
     const t = Number.isFinite(p.time)
       ? p.time
       : (state.playbackPos && Number.isFinite(state.playbackPos.time) ? state.playbackPos.time : w.peak);
-    const hitResult = hitTestPreviewEvent(w, p.nx, p.ny, t, p.screenW, p.screenH);
+    // Ask the CLI for the real boxes at this frame. Merge-time exact boxes are
+    // rendered per event and miss libass collision stacking (and fades/effects).
+    let liveById = null;
+    if (S.previewBoxes) {
+      try {
+        const live = await S.previewBoxes({ time: t });
+        if (live && live.ok && Array.isArray(live.boxes)) {
+          liveById = new Map(live.boxes.map(b => [b.id, b]));
+          state.diagnostics.liveBoxes = {
+            time: t, count: live.boxes.length, ids: live.boxes.map(b => b.id),
+          };
+        }
+      } catch (e) {
+        uiLog('warn', 'preview boxes unavailable', { time: t, error: e.message });
+      }
+    }
+    const hitResult = hitTestPreviewEvent(w, p.nx, p.ny, t, p.screenW, p.screenH, liveById);
     const hit = hitResult && !hitResult.miss ? hitResult : null;
     const candidates = hitResult ? hitResult.candidates : [];
     const diag = {
@@ -2300,12 +2356,12 @@ function handlePreviewDrag(p) {
       return;
     }
     const ids = previewDragEventIds(w, hit.eventId);
-    const boxes = previewDragBoxes(w, ids, t);
+    const boxes = previewDragBoxes(w, ids, t, liveById);
     state.drag = {
       windowId: w.id, eventIds: ids, hitEvent: hit.eventId, mode: p.mode, time: t,
       boxes, playW: play.w, playH: play.h,
       screenW: p.screenW, screenH: p.screenH,
-      hitInfo: hit,
+      hitInfo: hit, liveById,
     };
     state.selected = { windowId: w.id, eventId: hit.eventId };
     uiLog('info', 'preview selected event', {
@@ -2327,8 +2383,8 @@ function handlePreviewDrag(p) {
     if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
     if (S.dragBoxes) S.dragBoxes({ playW: play.w, playH: play.h, boxes });
     const tf = hit.transform ? `, transform ${hit.transform}` : '';
-    const src = hit.source !== 'exact' && hit.source !== 'samples'
-      ? ', estimated box' : '';
+    const src = ['exact', 'samples', 'live'].includes(hit.source)
+      ? '' : ', estimated box';
     setStatus(`selected #${hit.eventId}${tf}${src}; drag to move` +
       (p.mode === 'axis' ? ', axis locked' : p.mode === 'fine' ? ', fine' : ''));
   } else if (p.phase === 'up') {
@@ -2344,7 +2400,9 @@ function handlePreviewDrag(p) {
       return;
     }
     ({ dx, dy } = snapPreviewDrag(drag, dx, dy));
-    const moved = moveEventsBy(w, drag.eventIds, dx, dy, { source: 'drag' });
+    const moved = moveEventsBy(w, drag.eventIds, dx, dy, {
+      source: 'drag', liveBoxes: drag.liveById,
+    });
     state.diagnostics.lastDrag = {
       windowId: w.id, eventIds: drag.eventIds, hitEvent: drag.hitEvent,
       rawDx: raw.dx, rawDy: raw.dy, dx, dy, moved,

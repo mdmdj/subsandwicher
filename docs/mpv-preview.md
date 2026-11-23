@@ -95,8 +95,14 @@ not stretch or shift the result. Every phase also carries the raw OSD size,
 margins, mouse position and `par`; those values are written to the app log.
 
 The controller hit-tests with the exact libass ink box from the decision log
-when available. A coarse 16x8 ink-coverage grid travels with each exact box, so
-clicking an empty corner of a rotated/skewed bounding box does not select it.
+when available. Before a drag starts, the CLI `boxes` command re-renders the
+current preview frame and returns the real on-screen boxes: events are rendered
+together (so libass collision stacking matches mpv), other events are made
+transparent so only the target contributes ink, and fades/alpha and Effect-column
+motion are honored. This also fixes signs that share a style and are stacked
+vertically by libass but were rendered alone in the decision log. A coarse 16x8
+ink-coverage grid travels with each exact box, so clicking an empty corner of a
+rotated/skewed bounding box does not select it.
 `\t` animated transforms and Effect-column motion (`Banner`, `Scroll up`,
 `Scroll down`) get several `boxSamples` across the event, and moving events
 translate the nearest `\move` sample. Events without an exact mask get

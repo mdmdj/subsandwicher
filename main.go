@@ -20,6 +20,7 @@ Usage:
   subsandwicher merge --video <file> -primary-index N -secondary-index M [-out <path>] [-report <path>]
   subsandwicher report --ass <merged.ass> [-out <report.json>] [--secondary-suffix=-eng]
   subsandwicher apply --ass <merged.ass> --report <report.json> --out <out.ass> [--fix=<window>:<candidate> ...] [--fix-json=<fix object> ...]
+  subsandwicher boxes --ass <merged.ass> --time <seconds>
   subsandwicher <video-file> <primary-lang> <secondary-lang>
 
 All arguments are named. "probe" prints subtitle streams as JSON, including
@@ -59,6 +60,8 @@ func run() error {
 		return cmdReport(os.Args[2:])
 	case "apply":
 		return cmdApply(os.Args[2:])
+	case "boxes":
+		return cmdBoxes(os.Args[2:])
 	default:
 		return cmdLangMerge(os.Args[1:], false)
 	}
@@ -302,6 +305,31 @@ func cmdApply(args []string) error {
 		return err
 	}
 	enc, err := json.Marshal(res)
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(enc))
+	return nil
+}
+
+// cmdBoxes prints the libass-correct on-screen boxes at one preview time.
+func cmdBoxes(args []string) error {
+	fs := flag.NewFlagSet("boxes", flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	ass := fs.String("ass", "", "merged or preview .ass to measure")
+	at := fs.Float64("time", -1, "preview time in seconds")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *ass == "" || *at < 0 {
+		fs.Usage()
+		return errors.New("boxes requires -ass and -time")
+	}
+	boxes, err := sandwicher.PreviewBoxes(*ass, *at)
+	if err != nil {
+		return err
+	}
+	enc, err := json.Marshal(map[string]any{"time": *at, "boxes": boxes})
 	if err != nil {
 		return err
 	}

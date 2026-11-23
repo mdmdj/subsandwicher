@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('subsandwicher', {
   onPreviewDrag: (cb) => { ipcRenderer.on('preview-drag', (_e, p) => cb(p)); },
   onPreviewBase: (cb) => { ipcRenderer.on('preview-base', (_e, p) => cb(p)); },
   dragBoxes: (payload) => ipcRenderer.invoke('preview-drag-boxes', payload),
+  previewBoxes: (payload) => ipcRenderer.invoke('preview-boxes', payload),
   cancelDrag: () => ipcRenderer.invoke('preview-drag-cancel'),
   setBase: (payload) => ipcRenderer.invoke('preview-set-base', payload),
   clearBase: () => ipcRenderer.invoke('preview-clear-base'),

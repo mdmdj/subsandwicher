@@ -11,6 +11,7 @@ let mainWindow = null;
 let activeSession = null;
 let tempDir = null;
 let previewCtx = null; // { videoPath, mergedPath } for auto-relaunch after mpv death
+const previewBoxCache = new Map(); // path|mtime|time -> current libass boxes
 let activeMergeProcess = null; // cli process for the running merge
 let playbackTimer = null; // pauses a non-looping window at its end
 let playbackClock = null; // polls mpv time-pos while a conflict window plays
@@ -218,6 +219,32 @@ function launchPreview(opts) {
     session.onClientMessage = (args) => handleMpvClientMessage(args);
     return session;
   });
+}
+
+// Current libass boxes for preview hit-testing. These include collision
+// stacking, fades and Effect-column motion, which the merge-time masks cannot
+// know at an arbitrary preview time.
+async function previewBoxesAt(time) {
+  const p = previewCtx && previewCtx.previewPath;
+  if (!p || !Number.isFinite(time)) return null;
+  let stamp = '';
+  try {
+    const st = fs.statSync(p);
+    stamp = `${st.mtimeMs}:${st.size}`;
+  } catch (e) {
+    return null;
+  }
+  const key = `${p}|${stamp}|${time.toFixed(3)}`;
+  if (previewBoxCache.has(key)) return previewBoxCache.get(key);
+  const res = await runCli(['boxes', `--ass=${p}`, `--time=${time}`], {});
+  const boxes = Array.isArray(res.boxes) ? res.boxes : [];
+  log('info', 'preview boxes at', time, { count: boxes.length, ids: boxes.map(b => b.id) });
+  previewBoxCache.set(key, boxes);
+  if (previewBoxCache.size > 40) {
+    const first = previewBoxCache.keys().next().value;
+    previewBoxCache.delete(first);
+  }
+  return boxes;
 }
 
 function handleMpvClientMessage(args) {
@@ -501,6 +528,16 @@ app.whenReady().then(() => {
     } catch (e) {
       log('error', 'apply preview failed', e.message);
       return { ok: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('preview-boxes', async (_e, { time }) => {
+    try {
+      const boxes = await previewBoxesAt(Number(time));
+      return { ok: true, time, boxes: boxes || [] };
+    } catch (e) {
+      log('warn', 'preview boxes failed', e.message);
+      return { ok: false, error: e.message, boxes: [] };
     }
   });
 

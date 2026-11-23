@@ -2,6 +2,8 @@ package sandwicher
 
 import (
 	"math"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -109,5 +111,37 @@ func TestApplyMoveTranslatesRotationOrigin(t *testing.T) {
 	}
 	if !strings.Contains(d.Text, `\org(110,120)`) {
 		t.Errorf("org not translated with move: %s", d.Text)
+	}
+}
+
+func TestPreviewBoxesIncludeCollisionStacking(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH")
+	}
+	doc := assDoc("PlayResX: 640\nPlayResY: 360\n",
+		"Top,Arial,40,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,20,20,40,1\n",
+		"Dialogue: 0,0:00:01.00,0:00:05.00,Top,,0,0,0,,first label\n"+
+			"Dialogue: 0,0:00:01.00,0:00:05.00,Top,,0,0,0,,second label\n")
+	out := filepath.Join(t.TempDir(), "stack.ass")
+	if err := writeDoc(doc, out); err != nil {
+		t.Fatal(err)
+	}
+	boxes, err := PreviewBoxes(out, 2.0)
+	if err != nil {
+		t.Skipf("preview masks unavailable: %v", err)
+	}
+	if len(boxes) != 2 {
+		t.Fatalf("boxes = %+v, want 2", boxes)
+	}
+	if boxes[0].ID != 0 || boxes[1].ID != 1 {
+		t.Fatalf("box order = %+v", boxes)
+	}
+	// A solo render would put both at the same margin. Collision handling must
+	// separate them vertically.
+	if math.Abs(boxes[0].Box.Y0-boxes[1].Box.Y0) < 10 {
+		t.Fatalf("collision stacking not applied: first %+v second %+v", boxes[0].Box, boxes[1].Box)
+	}
+	if boxes[1].Box.Y1 > boxes[0].Box.Y0 && boxes[0].Box.Y1 > boxes[1].Box.Y0 {
+		t.Fatalf("stacked boxes still overlap vertically: first %+v second %+v", boxes[0].Box, boxes[1].Box)
 	}
 }
