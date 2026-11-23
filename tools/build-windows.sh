@@ -95,12 +95,23 @@ if [ -e "$OUT" ]; then rm -rf "$OUT"; fi
 cp -r "$STAGE" "$OUT"
 find "$OUT" -name ".*" -type d ! -path "*/locales/*" -exec rm -rf {} + 2>/dev/null || true
 
-# (re)write the portable zip — make_archive replaces an existing file
-python3 - <<PY
-import shutil, os
-os.chdir("$ROOT/dist")
-if os.path.exists("SubSandwicher-win-x64.zip"):
-    os.remove("SubSandwicher-win-x64.zip")
-shutil.make_archive("SubSandwicher-win-x64", "zip", ".", "SubSandwicher-win-x64")
+# (re)write portable zips with the app files at the archive root, so extracting
+# into a folder does not create an extra SubSandwicher-win-x64/ layer. Keep the
+# stable name and a version-tagged copy.
+python3 - "$OUT" "$ROOT/dist" "$BUILD_VERSION" <<'PY'
+import os, sys, zipfile
+out, distdir, version = sys.argv[1:4]
+for name in ("SubSandwicher-win-x64.zip", f"SubSandwicher-win-x64-v{version}.zip"):
+    path = os.path.join(distdir, name)
+    if os.path.exists(path):
+        os.remove(path)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        for root, dirs, files in os.walk(out):
+            dirs.sort()
+            files.sort()
+            for f in files:
+                full = os.path.join(root, f)
+                z.write(full, os.path.relpath(full, out))
+    print(f"    wrote {name}")
 PY
-echo "==> done: $OUT (+ zip)"
+echo "==> done: $OUT (+ zips)"
