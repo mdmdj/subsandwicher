@@ -1264,6 +1264,7 @@ function renderWindowDetail(w) {
   const chosenForWindow = state.chosen[w.id] || {};
   windowSuggestions.innerHTML = '<h3>Fix candidates</h3>' +
     '<div class="sug-sub" style="margin:0 0 6px">Choose a fix per event; Original keeps it unchanged. Selected fixes apply on save. ' +
+    '<b>best</b> is the top-ranked candidate for that event alone; <b>safe</b> is a small sign-only move that met the auto-apply threshold. Neither accounts for the other events’ chosen fixes — the combined layout appears when the preview reloads. ' +
     'Click/drag a subtitle in the preview (Shift axis, Alt fine, arrows nudge, R reset). ' +
     'Ctrl+drag marks the translated area; Ctrl+drag its corners or red handle reshapes/rotates it; click a green anchor (or the arrow buttons below) to place the selected subtitle; B clears the base.</div>';
 
@@ -1275,6 +1276,7 @@ function renderWindowDetail(w) {
     '<label>dx <input class="group-dx" type="number" step="1" value="0"></label>' +
     '<label>dy <input class="group-dy" type="number" step="1" value="0"></label>' +
     '<button type="button" class="small group-apply" disabled>Move selected</button>' +
+    '<button type="button" class="small pick-best" title="Choose the top-ranked candidate for every event in this window, then preview the combined layout">Pick best all</button>' +
     '<label class="group-style">style <select class="group-style-select"><option value="">all styles</option></select></label>' +
     '<button type="button" class="small group-split" title="Give each selected/style event its own new layer so they cannot collide">Split layers</button>' +
     '<button type="button" class="small minor group-clear" disabled>Clear selection</button>' +
@@ -1293,6 +1295,7 @@ function renderWindowDetail(w) {
     styleSel.appendChild(opt);
   }
   groupBar.querySelector('.group-split').addEventListener('click', () => splitGroupLayers(w, groupBar));
+  groupBar.querySelector('.pick-best').addEventListener('click', () => pickBestForWindow(w));
   groupBar.querySelector('.group-apply').addEventListener('click', () => {
     const dx = Number(groupBar.querySelector('.group-dx').value) || 0;
     const dy = Number(groupBar.querySelector('.group-dy').value) || 0;
@@ -1436,9 +1439,9 @@ function renderWindowDetail(w) {
       }
       if (s.kind === 'shrink') bits.push(`font ${Math.round((s.fontScale || 1) * 100)}%`);
       const badges =
-        (s.autoApply ? '<span class="badge auto">auto</span> ' : '') +
-        (s.manualReview ? '<span class="badge manual">manual</span> ' : '') +
-        (s.recommended ? '<span class="badge">recommended</span> ' : '') +
+        (s.autoApply ? '<span class="badge auto" title="Small sign-only move that met the auto-apply threshold">safe</span> ' : '') +
+        (s.manualReview ? '<span class="badge manual" title="Large move; check the preview">large</span> ' : '') +
+        (s.recommended ? '<span class="badge" title="Top-ranked candidate for this event on its own; not a window-wide choice">best</span> ' : '') +
         (matchesSibling ? `<span class="badge pair">same move as #${siblingMove.event}</span> ` : '') +
         (!matchesSibling && sharedAll ? `<span class="badge pair">shared by ${1 + s.sharedWith.length} signs</span> ` : '') +
         (chosen ? '<span class="badge auto">chosen</span>' : '');
@@ -1765,6 +1768,27 @@ function moveEventsBy(w, eventIds, dx, dy, opts = {}) {
 function applyGroupMove(w, dx, dy) {
   const events = Object.keys(state.groupSel[w.id] || {}).map(Number);
   moveEventsBy(w, events, dx, dy, { source: 'group' });
+}
+
+function pickBestForWindow(w) {
+  const chosen = state.chosen[w.id] || (state.chosen[w.id] = {});
+  let picked = 0;
+  for (const g of (w.byEvent || [])) {
+    const id = (g.suggestionIds || []).find(i => w.suggestions[i] && w.suggestions[i].recommended);
+    if (id === undefined) continue;
+    chosen[g.event] = id;
+    picked++;
+  }
+  if (!picked) {
+    setStatus('pick best: no recommended candidates in this window', true);
+    return;
+  }
+  const scroll = windowDetail.scrollTop;
+  renderWindowDetail(w);
+  windowDetail.scrollTop = scroll;
+  state.windowScroll[w.id] = scroll;
+  applyPreviewTo(state.pausedWindow === w.id ? null : w.peak);
+  setStatus(`pick best: chose ${picked} top-ranked candidate(s); checking the combined layout`);
 }
 
 function splitGroupLayers(w, groupBar) {

@@ -328,8 +328,11 @@ Suggestions are deterministic candidates, not applied changes.
 Every conflicting event gets its own candidate group, including primary
 dialogue. Dialogue moves are review-only: `autoApply` is never set for them.
 The engine is intentionally conservative and never moves primary dialogue
-automatically. `recommended` marks the lowest cost; `autoApplyCount` and
-`manualReviewCount` let the UI pre-check the safe ones.
+automatically. `recommended` marks the lowest cost **for that event on its
+own**; the UI labels it `best`. `autoApply` is shown as `safe` and only says
+that this candidate met the small sign-only move thresholds. Neither is a
+window-wide choice: selected candidates are combined only when the preview is
+applied, and `autoApplyCount`/`manualReviewCount` are per-event counts.
 
 ## Filtering
 
@@ -402,6 +405,11 @@ The **Review conflicts** panel:
   candidate originally moved only one axis. The override and the window
   comment are recorded with the applied fix in the review log. **Reset to
   candidate** removes the edit.
+- **Best/safe are per-event only:** `best` is the highest-ranked candidate for
+  that event on its own; `safe` means the sign-only move met the auto-apply
+  thresholds. **Pick best all** chooses the top-ranked candidate for every event
+  in the window and previews the combined layout, so overlapping independent
+  choices become visible before saving.
 - **Group move:** tick one or more event headings and enter a shared `dx/dy`.
   Each selected event gets its own override composed with its current fix, so
   a cluster of signs can keep its relative layout. The selection works across

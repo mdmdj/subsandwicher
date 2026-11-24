@@ -345,11 +345,14 @@ func placeCandidates(ev *plannedEvent, at float64, active []*plannedEvent, playW
 	})
 
 	sort.SliceStable(out, func(i, j int) bool {
+		if d := out[i].Cost - out[j].Cost; math.Abs(d) > 1e-9 {
+			return d < 0
+		}
 		zi, zj := out[i].DialogueOverlap == 0, out[j].DialogueOverlap == 0
 		if zi != zj {
 			return zi
 		}
-		return out[i].Cost < out[j].Cost
+		return out[i].Event < out[j].Event
 	})
 	return out
 }
@@ -507,11 +510,14 @@ func suggestForWindow(w ConflictWindow, byID map[int]*plannedEvent, conflicts ma
 			if si != sj {
 				return si
 			}
+			if d := kept[i].Cost - kept[j].Cost; math.Abs(d) > 1e-9 {
+				return d < 0
+			}
 			zi, zj := kept[i].DialogueOverlap == 0, kept[j].DialogueOverlap == 0
 			if zi != zj {
 				return zi
 			}
-			return kept[i].Cost < kept[j].Cost
+			return kept[i].Event < kept[j].Event
 		})
 		if len(kept) > 6 {
 			top := append([]Suggestion{}, kept[:6]...)
