@@ -32,6 +32,17 @@ let state = {
   probing: false,
   diagnostics: {}, // last preview hit/drag/OSD geometry, copied with review state
   lastPreviewTime: null, // last frame used for a preview click, for box warming
+  spoiler: {
+    enabled: false,
+    canToggle: false, // this merge produced a spoiler seed, so the switch works
+    seed: 0,
+    previewPath: null,
+    videoHeight: 0,
+    previewRevealId: 0, // window currently unscrambled in the preview file
+    revealWindowId: 0,
+    blurByWindow: {},
+    blurPercent: 85,
+  },
 };
 
 const sel = (s) => document.querySelector(s);
@@ -88,7 +99,20 @@ const btnStopWindow = sel('#btn-stop-window');
 const btnPauseWindow = sel('#btn-pause-window');
 const optLoop = sel('#opt-loop');
 const optUnmute = sel('#opt-unmute');
+const unmuteLabel = sel('#unmute-label');
 const optSpeed = sel('#opt-speed');
+const optNoSpoilers = sel('#opt-no-spoilers');
+const spoilerUnlockWrap = sel('#spoiler-unlock-wrap');
+const spoilerUnlock = sel('#spoiler-unlock');
+const spoilerUnlockLabel = sel('#spoiler-unlock-label');
+const spoilerBlurDefaultWrap = sel('#spoiler-blur-default-wrap');
+const spoilerBlurDefault = sel('#spoiler-blur-default');
+const spoilerBlurDefaultLabel = sel('#spoiler-blur-default-label');
+const optBlurWrap = sel('#opt-blur-wrap');
+const optBlur = sel('#opt-blur');
+const optBlurLabel = sel('#opt-blur-label');
+const btnBlurDefault = sel('#btn-blur-default');
+const btnRevealWindow = sel('#btn-reveal-window');
 const playState = sel('#play-state');
 const windowProgress = sel('#window-progress');
 const windowProgressFill = sel('#window-progress-fill');
@@ -130,6 +154,155 @@ function setStatus(msg, isError = false) {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ---------- No Spoilers mode ----------
+
+function noSpoilersOn() {
+  return !!(state.spoiler && state.spoiler.enabled);
+}
+
+function windowRevealed(windowId) {
+  return noSpoilersOn() && Number(state.spoiler.revealWindowId) === Number(windowId);
+}
+
+// Scrambled text is used only in the review DOM; the report and merged file
+// keep the original text for save and for deliberate reveal.
+function displayEventText(ev, windowId) {
+  if (!ev) return '';
+  if (!noSpoilersOn() || windowRevealed(windowId)) return ev.text || '';
+  // Never fall back to the original text while the veil is up.
+  return ev.displayText || '';
+}
+
+function redactRaw(raw, windowId, ev) {
+  if (!noSpoilersOn() || windowRevealed(windowId)) return raw;
+  const display = (ev && ev.displayText) || '[hidden]';
+  // Raw Dialogue lines have nine metadata fields before Text. Keep the
+  // metadata and replace only the spoken text.
+  let idx = -1;
+  for (let n = 0; n < 9; n++) {
+    idx = raw.indexOf(',', idx + 1);
+    if (idx < 0) return raw;
+  }
+  return raw.slice(0, idx + 1) + display;
+}
+
+function blurBaseSigma() {
+  const h = Number(state.spoiler.videoHeight) || 1080;
+  return Math.max(12, Math.round(h * 0.10));
+}
+
+function blurSigmaForPercent(percent) {
+  const p = Math.max(0, Math.min(100, Number(percent) || 0));
+  return Math.round(blurBaseSigma() * p / 100);
+}
+
+let spoilerSwitchDragging = false;
+
+function hasWindowBlurOverride(windowId) {
+  return Number.isFinite(state.spoiler.blurByWindow[windowId]);
+}
+
+function windowBlurPercent(windowId) {
+  return hasWindowBlurOverride(windowId)
+    ? state.spoiler.blurByWindow[windowId]
+    : state.spoiler.blurPercent;
+}
+
+function windowBlurSigma(windowId) {
+  if (windowRevealed(windowId)) return 0;
+  return blurSigmaForPercent(windowBlurPercent(windowId));
+}
+
+function applyWindowBlur(windowId) {
+  if (!noSpoilersOn()) return;
+  S.setPreviewBlur({ sigma: windowBlurSigma(windowId) }).catch(() => {});
+}
+
+function syncGlobalBlur() {
+  const pct = state.spoiler.blurPercent;
+  if (spoilerBlurDefault) spoilerBlurDefault.value = String(pct);
+  if (spoilerBlurDefaultLabel) spoilerBlurDefaultLabel.textContent = `${pct}%`;
+}
+
+function syncWindowBlurControl(w) {
+  if (!w) return;
+  const pct = windowBlurPercent(w.id);
+  if (optBlur) optBlur.value = String(pct);
+  if (optBlurLabel) optBlurLabel.textContent = `${pct}%`;
+  if (btnBlurDefault) {
+    btnBlurDefault.classList.toggle('hidden', !noSpoilersOn() || !hasWindowBlurOverride(w.id));
+  }
+}
+
+function syncSpoilerSwitch() {
+  const on = noSpoilersOn();
+  if (spoilerUnlock && !spoilerSwitchDragging) spoilerUnlock.value = on ? '100' : '0';
+  if (spoilerUnlockWrap) spoilerUnlockWrap.classList.remove('armed');
+  if (spoilerUnlockLabel) {
+    spoilerUnlockLabel.textContent = on
+      ? 'No Spoilers on — slide left to reveal everything'
+      : 'No Spoilers off — slide right to re-enable';
+  }
+}
+
+function resetSpoiler() {
+  state.spoiler = {
+    enabled: false,
+    canToggle: false,
+    seed: 0,
+    previewPath: null,
+    videoHeight: 0,
+    previewRevealId: 0,
+    revealWindowId: 0,
+    blurByWindow: {},
+    blurPercent: 85,
+  };
+  if (optNoSpoilers) optNoSpoilers.checked = false;
+  refreshSpoilerChrome();
+}
+
+function refreshSpoilerChrome() {
+  const on = noSpoilersOn();
+  const canToggle = !!(state.spoiler && state.spoiler.canToggle);
+  if (spoilerUnlockWrap) spoilerUnlockWrap.classList.toggle('hidden', !canToggle);
+  if (spoilerBlurDefaultWrap) spoilerBlurDefaultWrap.classList.toggle('hidden', !canToggle);
+  if (optBlurWrap) optBlurWrap.classList.toggle('hidden', !on);
+  if (btnRevealWindow) btnRevealWindow.classList.toggle('hidden', !on);
+  if (optUnmute) {
+    optUnmute.disabled = on;
+    if (on) optUnmute.checked = false;
+  }
+  if (unmuteLabel) {
+    unmuteLabel.title = on
+      ? 'Audio is locked in No Spoilers mode'
+      : 'Unmute the preview audio';
+  }
+  syncSpoilerSwitch();
+  syncGlobalBlur();
+  syncWindowBlurControl(state.reviewWindow);
+  refreshRevealButton(state.reviewWindow);
+}
+
+function refreshRevealButton(w) {
+  if (!btnRevealWindow) return;
+  const revealed = w && windowRevealed(w.id);
+  btnRevealWindow.textContent = revealed ? 'Revealed — hold to hide' : 'Hold to reveal window';
+  setRevealButtonFill(revealed);
+  btnRevealWindow.classList.toggle('hidden', !noSpoilersOn());
+  // Random frame can jump outside the revealed window, so keep it parked
+  // while the veil is lifted. Turning the whole mode off frees it again.
+  if (btnAnother) {
+    btnAnother.disabled = noSpoilersOn()
+      ? !!state.spoiler.revealWindowId
+      : !state.review;
+  }
+}
+
+function setRevealButtonFill(revealed) {
+  btnRevealWindow.classList.toggle('revealed', !!revealed);
+  btnRevealWindow.style.setProperty('--hold', '0%');
 }
 
 function fmtClock(s) {
@@ -226,6 +399,7 @@ function resetToLoad(message = '') {
   state.pausedWindow = null;
   state.langsCollapsed = false;
   state.diagnostics = {};
+  resetSpoiler();
   actions.classList.add('hidden');
   actions.classList.remove('review-mode');
   review.classList.add('hidden');
@@ -288,6 +462,7 @@ async function loadVideo(p) {
     state.playingWindow = null;
     state.pausedWindow = null;
     state.langsCollapsed = false;
+    resetSpoiler();
     dropzone.classList.add('hidden');
     actions.classList.remove('hidden');
     actions.classList.remove('review-mode');
@@ -482,6 +657,7 @@ async function eject() {
   state.pausedWindow = null;
   state.langsCollapsed = false;
   state.diagnostics = {};
+  resetSpoiler();
   actions.classList.add('hidden');
   actions.classList.remove('review-mode');
   review.classList.add('hidden');
@@ -518,6 +694,7 @@ btnPreview.addEventListener('click', async () => {
         videoPath: state.videoPath,
         primaryIndex: state.primaryIndex,
         secondaryIndex: state.secondaryIndex,
+        noSpoilers: !!(optNoSpoilers && optNoSpoilers.checked),
       });
     } finally {
       state.merging = false;
@@ -541,6 +718,20 @@ btnPreview.addEventListener('click', async () => {
     state.windowScroll = {};
     state.playingWindow = null;
     state.pausedWindow = null;
+    const spoiler = (state.review && state.review.spoiler) || {};
+    const spoilerSeed = spoiler.seed || stats.spoiler_seed || 0;
+    state.spoiler = {
+      enabled: !!(spoiler.enabled || stats.spoiler_preview),
+      canToggle: !!spoilerSeed,
+      seed: spoilerSeed,
+      previewPath: stats.spoiler_preview || spoiler.preview || null,
+      videoHeight: stats.video_height || 0,
+      previewRevealId: 0,
+      revealWindowId: 0,
+      blurByWindow: {},
+      blurPercent: state.spoiler.blurPercent || 85,
+    };
+    refreshSpoilerChrome();
     updatePlaybackButtons();
     renderReview();
     enterReviewMode();
@@ -553,6 +744,10 @@ btnPreview.addEventListener('click', async () => {
       mergedPath: stats.out,
       reportPath: stats.report_path,
       seekTo: close,
+      spoilerPath: state.spoiler.previewPath,
+      noSpoilers: noSpoilersOn(),
+      seed: state.spoiler.seed,
+      blurSigma: noSpoilersOn() ? blurSigmaForPercent(state.spoiler.blurPercent) : 0,
     });
     syncBaseToPreview();
     if (state.review) {
@@ -652,7 +847,8 @@ function renderReviewSummary() {
   const changed = wins.filter(windowChanged).length;
   const s = state.review.summary || {};
   reviewSummary.textContent =
-    `${wins.length} windows · ${done} done · ${changed} changed · ${again} to recheck · ${s.conflicts || 0} conflicts`;
+    `${wins.length} windows · ${done} done · ${changed} changed · ${again} to recheck · ${s.conflicts || 0} conflicts` +
+    (noSpoilersOn() ? ' · No Spoilers on' : '');
 }
 function updateWindowStatus(w) {
   if (!w) return;
@@ -759,6 +955,16 @@ function selectWindow(id, scroll = true, seek = false) {
     S.previewPlayback({ action: 'stop' }).catch(() => {});
   }
   state.reviewWindow = w;
+  // A revealed window re-locks when another window is selected.
+  if (noSpoilersOn() && state.spoiler.revealWindowId && state.spoiler.revealWindowId !== id) {
+    state.spoiler.revealWindowId = 0;
+    if (state.merged && state.spoiler.previewRevealId) {
+      state.spoiler.previewRevealId = 0;
+      applyPreviewTo(w.peak, true).catch(() => {});
+    }
+  }
+  refreshSpoilerChrome();
+  applyWindowBlur(id);
   reviewNote.value = state.notes[id] || '';
   syncBaseToPreview();
 
@@ -843,6 +1049,7 @@ async function applyPreviewTo(seekTo, forceStop = false) {
         fixes: chosenFixes(),
         seekTo: keep ? null : target,
         keepPlaying: keep,
+        revealWindowId: noSpoilersOn() ? (state.spoiler.revealWindowId || 0) : 0,
       });
       if (!res || !res.ok) {
         setStatus('preview update failed: ' + ((res && res.error) || 'see logs'), true);
@@ -852,6 +1059,7 @@ async function applyPreviewTo(seekTo, forceStop = false) {
         state.playingWindow = null;
         updatePlaybackButtons();
       }
+      if (noSpoilersOn()) state.spoiler.previewRevealId = state.spoiler.revealWindowId || 0;
       updateAppliedIndicators(res);
       if (state.reviewWindow) refreshAppliedIndicators(state.reviewWindow);
       // Warm the boxes for the frame we are paused on, so the next mouse-down
@@ -909,7 +1117,7 @@ function eventSeek(w, eventId) {
 function playbackSettings() {
   return {
     loop: optLoop.checked,
-    muted: !optUnmute.checked,
+    muted: noSpoilersOn() ? true : !optUnmute.checked,
     speed: Number(optSpeed.value) || 1,
   };
 }
@@ -1058,8 +1266,10 @@ function swatchesFor(ev) {
     '</span>';
 }
 
-function eventDetailsHtml(ev) {
+function eventDetailsHtml(ev, windowId) {
   if (!ev) return '';
+  const text = displayEventText(ev, windowId);
+  const raw = ev.raw ? redactRaw(ev.raw, windowId, ev) : '';
   const decisions = (ev.decisions || []).map(d =>
     `<div class="dec ${d.level >= 2 ? 'warn' : ''}">${escapeHtml(d.rule)} · ${escapeHtml(d.levelName)} · ${escapeHtml(d.surface)}` +
     `${d.reason ? ' — ' + escapeHtml(d.reason) : ''}</div>`).join('');
@@ -1072,11 +1282,11 @@ function eventDetailsHtml(ev) {
     `<div class="meta">#${ev.id} · ${escapeHtml(ev.track)} ${escapeHtml(ev.role)} · ${escapeHtml(ev.style)} · ` +
     `${escapeHtml(fmtClock(ev.start))}–${escapeHtml(fmtClock(ev.end))} · align ${ev.align}` +
     `${ev.pos ? ` · pos ${fmtNum(ev.pos.x)},${fmtNum(ev.pos.y)}` : ''} · importance ${fmtNum(ev.importance, 2)}</div>` +
-    `<div class="txt">${escapeHtml(ev.text || '')}</div>` +
+    `<div class="txt">${escapeHtml(text)}</div>` +
     `<div class="dec">${boxLabel}${ev.moving ? ' · moving' : ''}` +
     `${transformLabel(ev) ? ` · transform ${escapeHtml(transformLabel(ev))}` : ''}</div>` +
     decisions +
-    (ev.raw ? `<details><summary class="dec">raw ASS</summary><div class="raw">${escapeHtml(ev.raw)}</div></details>` : '') +
+    (raw ? `<details><summary class="dec">raw ASS</summary><div class="raw">${escapeHtml(raw)}</div></details>` : '') +
     '</details>';
 }
 
@@ -1342,7 +1552,7 @@ function renderWindowDetail(w) {
     const head = document.createElement('div');
     head.className = 'fix-event-head';
     const seekTxt = Number.isFinite(g.seek) ? ` · ${fmtClock(g.seek)}` : '';
-    const title = ev ? (ev.text || `Event #${g.event}`) : `Event #${g.event}`;
+    const title = ev ? (displayEventText(ev, w.id) || `Event #${g.event}`) : `Event #${g.event}`;
     const le = eventLayerEdit(w, g.event);
     const layer = effectiveLayer(w, g.event, ev);
     const own = !!(le && le.ownLayer);
@@ -1388,7 +1598,7 @@ function renderWindowDetail(w) {
     const ownBox = head.querySelector('.own-layer input');
     if (ownBox) ownBox.addEventListener('change', () => setLayerEdit(w, g.event, { ownLayer: ownBox.checked }));
     wrap.appendChild(head);
-    wrap.insertAdjacentHTML('beforeend', eventDetailsHtml(ev));
+    wrap.insertAdjacentHTML('beforeend', eventDetailsHtml(ev, w.id));
     const warn = state.fixWarnings[`${w.id}:${g.event}`];
     if (warn) wrap.appendChild(fixWarningDiv(warn));
     if (g.note && g.ids.length) {
@@ -2866,6 +3076,183 @@ btnPauseWindow.addEventListener('click', pauseWindow);
 optLoop.addEventListener('change', updatePlaybackSettings);
 optUnmute.addEventListener('change', updatePlaybackSettings);
 optSpeed.addEventListener('change', updatePlaybackSettings);
+
+// Global default blur: windows without their own level follow it. The radius
+// scales with video height because a fixed sigma is mild at 480p and useless
+// at 4K.
+spoilerBlurDefault.addEventListener('input', () => {
+  const pct = Number(spoilerBlurDefault.value) || 85;
+  state.spoiler.blurPercent = pct;
+  syncGlobalBlur();
+  if (!noSpoilersOn()) return;
+  const w = state.reviewWindow;
+  if (w && !hasWindowBlurOverride(w.id) && !windowRevealed(w.id)) applyWindowBlur(w.id);
+  if (w) syncWindowBlurControl(w);
+});
+
+// Per-window blur stores an override; clearing it returns to the default.
+optBlur.addEventListener('input', () => {
+  const w = state.reviewWindow;
+  if (!w || !noSpoilersOn()) return;
+  const pct = Number(optBlur.value) || state.spoiler.blurPercent;
+  state.spoiler.blurByWindow[w.id] = pct;
+  syncWindowBlurControl(w);
+  if (!windowRevealed(w.id)) applyWindowBlur(w.id);
+});
+
+btnBlurDefault.addEventListener('click', () => {
+  const w = state.reviewWindow;
+  if (!w || !noSpoilersOn()) return;
+  delete state.spoiler.blurByWindow[w.id];
+  syncWindowBlurControl(w);
+  if (!windowRevealed(w.id)) applyWindowBlur(w.id);
+  setStatus(`window ${w.id} now follows the global default blur`);
+});
+
+// Click-and-hold is the per-window reveal: deliberate, but not a security
+// boundary. Releasing before the hold completes cancels it.
+let revealHoldRAF = null;
+
+function stopRevealHold(reset) {
+  if (revealHoldRAF) cancelAnimationFrame(revealHoldRAF);
+  revealHoldRAF = null;
+  if (reset && btnRevealWindow) btnRevealWindow.style.setProperty('--hold', '0%');
+}
+
+function startRevealHold(e) {
+  if (!noSpoilersOn() || !state.reviewWindow) return;
+  if (e) e.preventDefault();
+  if (revealHoldRAF) return;
+  const started = performance.now();
+  const tick = () => {
+    const pct = Math.min(100, ((performance.now() - started) / 900) * 100);
+    btnRevealWindow.style.setProperty('--hold', pct.toFixed(1) + '%');
+    if (pct >= 100) {
+      revealHoldRAF = null;
+      toggleRevealWindow();
+      return;
+    }
+    revealHoldRAF = requestAnimationFrame(tick);
+  };
+  revealHoldRAF = requestAnimationFrame(tick);
+}
+
+async function toggleRevealWindow() {
+  const w = state.reviewWindow;
+  if (!w || !noSpoilersOn()) return;
+  const next = Number(state.spoiler.revealWindowId) === w.id ? 0 : w.id;
+  state.spoiler.revealWindowId = next;
+  refreshRevealButton(w);
+  state.playingWindow = null;
+  state.pausedWindow = null;
+  setStatus(next
+    ? `revealing window ${w.id} — original text and video are visible`
+    : `window ${w.id} hidden again`);
+  await applyPreviewTo(w.peak, true);
+  applyWindowBlur(w.id);
+  if (state.reviewWindow && state.reviewWindow.id === w.id) {
+    const scroll = windowDetail.scrollTop;
+    renderWindowDetail(w);
+    windowDetail.scrollTop = scroll;
+  }
+}
+
+if (btnRevealWindow) {
+  btnRevealWindow.addEventListener('pointerdown', startRevealHold);
+  btnRevealWindow.addEventListener('pointerup', () => stopRevealHold(true));
+  btnRevealWindow.addEventListener('pointerleave', () => stopRevealHold(true));
+  btnRevealWindow.addEventListener('pointercancel', () => stopRevealHold(true));
+}
+
+// Whole-project switch: slide left to reveal everything, slide right to put
+// the veil back. It only fires at the far end on release of a real drag.
+async function disableSpoiler() {
+  if (!noSpoilersOn()) return;
+  const w = state.reviewWindow;
+  state.playingWindow = null;
+  state.pausedWindow = null;
+  updatePlaybackButtons();
+  const res = await S.spoilerDisable({
+    seekTo: w ? w.peak : undefined,
+    fixes: chosenFixes(),
+  });
+  if (!res || !res.ok) {
+    setStatus('could not turn No Spoilers mode off: ' + ((res && res.error) || 'see logs'), true);
+  } else {
+    state.spoiler.enabled = false;
+    state.spoiler.revealWindowId = 0;
+    state.spoiler.previewRevealId = 0;
+    if (optNoSpoilers) optNoSpoilers.checked = false;
+    setStatus('No Spoilers mode is off. Slide right to turn it back on. The saved file is unchanged.');
+  }
+  refreshSpoilerChrome();
+  renderReviewSummary();
+  if (w) renderWindowDetail(w);
+}
+
+async function enableSpoiler() {
+  if (noSpoilersOn() || !state.spoiler.canToggle) return;
+  const w = state.reviewWindow;
+  state.playingWindow = null;
+  state.pausedWindow = null;
+  updatePlaybackButtons();
+  const sigma = w ? windowBlurSigma(w.id) : blurSigmaForPercent(state.spoiler.blurPercent);
+  const res = await S.spoilerEnable({
+    seekTo: w ? w.peak : undefined,
+    fixes: chosenFixes(),
+    blurSigma: sigma,
+  });
+  if (!res || !res.ok) {
+    setStatus('could not turn No Spoilers mode back on: ' + ((res && res.error) || 'see logs'), true);
+  } else {
+    state.spoiler.enabled = true;
+    state.spoiler.revealWindowId = 0;
+    state.spoiler.previewRevealId = 0;
+    if (optNoSpoilers) optNoSpoilers.checked = true;
+    setStatus('No Spoilers mode is back on. Slide left to reveal everything again.');
+  }
+  refreshSpoilerChrome();
+  renderReviewSummary();
+  if (w) renderWindowDetail(w);
+}
+
+if (spoilerUnlock) {
+  let unlockStart = 100;
+  let unlockMoves = 0;
+  spoilerUnlock.addEventListener('pointerdown', () => {
+    unlockStart = Number(spoilerUnlock.value) || 0;
+    unlockMoves = 0;
+    spoilerSwitchDragging = true;
+  });
+  spoilerUnlock.addEventListener('pointermove', () => {
+    if (spoilerSwitchDragging) unlockMoves++;
+  });
+  window.addEventListener('pointerup', () => { spoilerSwitchDragging = false; });
+  spoilerUnlock.addEventListener('input', () => {
+    const v = Number(spoilerUnlock.value) || 0;
+    const on = noSpoilersOn();
+    const armed = on ? v <= 10 : v >= 90;
+    spoilerUnlockWrap.classList.toggle('armed', armed);
+    spoilerUnlockLabel.textContent = on
+      ? (armed ? 'Release to reveal everything' : 'No Spoilers on — slide left to reveal everything')
+      : (armed ? 'Release to re-enable No Spoilers' : 'No Spoilers off — slide right to re-enable');
+  });
+  spoilerUnlock.addEventListener('change', () => {
+    const v = Number(spoilerUnlock.value) || 0;
+    const on = noSpoilersOn();
+    // A click at the far end is not a slide: require a drag that started at
+    // the opposite end and produced real pointer movement.
+    const slid = unlockMoves >= 3;
+    spoilerSwitchDragging = false;
+    if (on && v <= 1 && unlockStart >= 95 && slid) {
+      disableSpoiler();
+    } else if (!on && v >= 99 && unlockStart <= 5 && slid) {
+      enableSpoiler();
+    } else {
+      syncSpoilerSwitch();
+    }
+  });
+}
 
 filterSurface.addEventListener('change', filterAndRenderList);
 filterCause.addEventListener('change', filterAndRenderList);

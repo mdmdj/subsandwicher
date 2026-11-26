@@ -409,12 +409,30 @@ type MergeStats struct {
 	ReviewRequired  int         `json:"review_required"`
 	Exact           bool        `json:"exact"`
 	ExactEvents     int         `json:"exact_events"`
+	// No Spoilers mode: the scrambled preview file and the source video size
+	// (the UI derives a resolution-appropriate blur radius from it).
+	SpoilerPreview string `json:"spoiler_preview,omitempty"`
+	VideoWidth     int    `json:"video_width,omitempty"`
+	VideoHeight    int    `json:"video_height,omitempty"`
+	SpoilerSeed    int64  `json:"spoiler_seed,omitempty"`
+}
+
+// MergeOptions controls optional merge behavior.
+type MergeOptions struct {
+	Exact      bool
+	NoSpoilers bool
 }
 
 // MergeTracks probes, extracts, merges and writes out. reportPath may be empty,
 // in which case the decision log is written next to the output. onProgress may
 // be nil; when set it receives (role, seconds} during extraction.
 func MergeTracks(video string, primary, secondary int, outPath, reportPath string, exact bool, reportProgress func(p Progress)) (*MergeStats, error) {
+	return MergeTracksOpts(video, primary, secondary, outPath, reportPath, MergeOptions{Exact: exact}, reportProgress)
+}
+
+// MergeTracksOpts is MergeTracks with optional No Spoilers output.
+func MergeTracksOpts(video string, primary, secondary int, outPath, reportPath string, opts MergeOptions, reportProgress func(p Progress)) (*MergeStats, error) {
+	exact := opts.Exact
 	emitProgress(reportProgress, Progress{Stage: "probe", Overall: stageProbeStart, Indeterminate: true,
 		Message: "probing subtitle streams…"})
 	streams, err := ProbeSubtitleStreams(video)
@@ -475,7 +493,9 @@ func MergeTracks(video string, primary, secondary int, outPath, reportPath strin
 	// Subtitle PlayRes is often 640x360 even for 1080p video. Upscaling to the
 	// video (capped at 1080p) keeps preview drag/position editing close to one
 	// video pixel per script pixel instead of quantising 1 px to ~3 video px.
+	videoW, videoH := 0, 0
 	if vw, vh, err := ProbeVideoSize(video); err == nil && vh > 0 && vw > 0 {
+		videoW, videoH = vw, vh
 		targetH := vh
 		if targetH > 1080 {
 			targetH = 1080
@@ -524,14 +544,7 @@ func MergeTracks(video string, primary, secondary int, outPath, reportPath strin
 	if reportPath == "" {
 		reportPath = outPath + ".report.json"
 	}
-	emitProgress(reportProgress, Progress{Stage: "report", Overall: stageReportStart, Indeterminate: true,
-		Message: "writing the decision log…"})
-	if err := WriteReport(reportPath, rep); err != nil {
-		return nil, fmt.Errorf("writing decision log: %w", err)
-	}
-	emitProgress(reportProgress, Progress{Stage: "review", Overall: stageReviewStart, Indeterminate: true,
-		Message: "preparing the review…"})
-	return &MergeStats{
+	stats := &MergeStats{
 		OutPath:         outPath,
 		Styles:          status,
 		Lines:           lines,
@@ -542,7 +555,48 @@ func MergeTracks(video string, primary, secondary int, outPath, reportPath strin
 		ReviewRequired:  rep.Summary.RequiredEvents,
 		Exact:           rep.Job.Exact,
 		ExactEvents:     rep.Job.ExactEvents,
-	}, nil
+		VideoWidth:      videoW,
+		VideoHeight:     videoH,
+	}
+	if opts.NoSpoilers {
+		emitProgress(reportProgress, Progress{Stage: "report", Overall: stageReportStart, Indeterminate: true,
+			Message: "preparing the No Spoilers preview…"})
+		// Keep the seed inside JavaScript's safe-integer range; the UI carries
+		// it around even though apply reads it from the report.
+		seed := time.Now().UnixNano() & ((1 << 53) - 1)
+		if seed == 0 {
+			seed = 1
+		}
+		spoilerPath := spoilerPreviewPath(outPath)
+		display, err := WriteSpoilerASS(outPath, spoilerPath, seed)
+		if err != nil {
+			return nil, fmt.Errorf("writing No Spoilers preview: %w", err)
+		}
+		if len(display) != len(rep.Events) {
+			return nil, fmt.Errorf("No Spoilers preview has %d events but the decision log has %d", len(display), len(rep.Events))
+		}
+		for i := range rep.Events {
+			rep.Events[i].DisplayText = display[i]
+		}
+		rep.Spoiler = &SpoilerInfo{Enabled: true, Seed: seed, Preview: spoilerPath}
+		stats.SpoilerPreview = spoilerPath
+		stats.SpoilerSeed = seed
+	}
+	emitProgress(reportProgress, Progress{Stage: "report", Overall: stageReportStart, Indeterminate: true,
+		Message: "writing the decision log…"})
+	if err := WriteReport(reportPath, rep); err != nil {
+		return nil, fmt.Errorf("writing decision log: %w", err)
+	}
+	emitProgress(reportProgress, Progress{Stage: "review", Overall: stageReviewStart, Indeterminate: true,
+		Message: "preparing the review…"})
+	return stats, nil
+}
+
+func spoilerPreviewPath(outPath string) string {
+	if strings.HasSuffix(outPath, ".ass") {
+		return strings.TrimSuffix(outPath, ".ass") + ".spoiler.ass"
+	}
+	return outPath + ".spoiler.ass"
 }
 
 // formatClock renders loading-progress times as m:ss.s.

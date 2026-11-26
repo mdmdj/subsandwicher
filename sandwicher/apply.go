@@ -78,8 +78,21 @@ var (
 // ApplyFixes reads a merged .ass and a report, applies the selected candidate
 // for each window, and writes the result. With no fixes it copies the input
 // byte-for-byte.
+// ApplyOptions controls preview-only rewriting. The normal save path never
+// enables NoSpoilers, so the file written next to the video keeps the original
+// subtitle text.
+type ApplyOptions struct {
+	NoSpoilers   bool
+	RevealWindow int // > 0 leaves that window's events unscrambled
+}
+
 func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult, error) {
-	if len(fixes) == 0 {
+	return ApplyFixesWithOptions(assPath, reportPath, outPath, fixes, ApplyOptions{})
+}
+
+// ApplyFixesWithOptions is ApplyFixes plus the No Spoilers preview transform.
+func ApplyFixesWithOptions(assPath, reportPath, outPath string, fixes []Fix, opts ApplyOptions) (*ApplyResult, error) {
+	if len(fixes) == 0 && !opts.NoSpoilers && opts.RevealWindow <= 0 {
 		data, err := os.ReadFile(assPath)
 		if err != nil {
 			return nil, err
@@ -183,8 +196,9 @@ func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult,
 	if len(ownLayer) > 0 {
 		isolateLayers(doc, ownLayer)
 	}
-	if len(res.Applied) == 0 {
-		// Everything was "original"; keep the file byte-identical.
+	if len(res.Applied) == 0 && !opts.NoSpoilers {
+		// Everything was "original"; keep the file byte-identical. No Spoilers
+		// keeps going so the preview copy is still scrambled.
 		orig, err := os.ReadFile(assPath)
 		if err != nil {
 			return nil, err
@@ -228,6 +242,24 @@ func ApplyFixes(assPath, reportPath, outPath string, fixes []Fix) (*ApplyResult,
 		}
 	}
 	res.RemainingConflicts = recheckConflicts(doc, &rep, changed)
+
+	if opts.NoSpoilers {
+		if rep.Spoiler == nil || rep.Spoiler.Seed == 0 {
+			return nil, fmt.Errorf("No Spoilers preview requested but the report has no spoiler seed")
+		}
+		reveal := map[int]bool{}
+		if opts.RevealWindow > 0 {
+			for i := range rep.Windows {
+				if rep.Windows[i].ID != opts.RevealWindow {
+					continue
+				}
+				for _, id := range rep.Windows[i].Events {
+					reveal[id] = true
+				}
+			}
+		}
+		scrambleDoc(doc, rep.Spoiler.Seed, reveal)
+	}
 
 	if err := writeDoc(doc, outPath); err != nil {
 		return nil, err

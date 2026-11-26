@@ -546,3 +546,46 @@ button.base-anchor:hover { background: #3a4f3a; }
 #dropzone p { margin: 4px 0; color: #99a; font-size: 13px; max-width: 760px; text-align: center; }
 #dropstatus { color: #aab; min-height: 17px; }
 #droperror { color: #f99; white-space: pre-wrap; }
+
+/* No Spoilers mode */
+.no-spoiler-toggle {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border: 1px solid #3a3a55;
+  border-radius: 8px;
+  background: #202032;
+  font-size: 12px;
+  color: #aab;
+  line-height: 1.4;
+}
+.no-spoiler-toggle strong { color: #dde; }
+.no-spoiler-toggle input { margin-top: 2px; }
+
+.spoiler-unlock {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #99a;
+  white-space: nowrap;
+}
+.spoiler-unlock input[type="range"] { width: 110px; }
+#spoiler-blur-default { width: 66px; }
+.spoiler-unlock.armed { color: #f0c674; }
+
+#opt-blur { width: 70px; }
+#btn-blur-default { padding: 2px 7px; }
+#opt-blur-label { color: #889; min-width: 30px; }
+
+.hold-btn { position: relative; overflow: hidden; }
+.hold-btn::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: var(--hold, 0%);
+  background: rgba(120, 140, 255, 0.38);
+  pointer-events: none;
+}
+.hold-btn.revealed { border-color: #b8863b; color: #f0c674; }

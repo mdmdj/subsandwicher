@@ -17,9 +17,9 @@ const usage = `subsandwicher: merge two subtitle tracks of a video into a single
 
 Usage:
   subsandwicher probe --video <file>
-  subsandwicher merge --video <file> -primary-index N -secondary-index M [-out <path>] [-report <path>]
+  subsandwicher merge --video <file> -primary-index N -secondary-index M [-out <path>] [-report <path>] [--no-spoilers]
   subsandwicher report --ass <merged.ass> [-out <report.json>] [--secondary-suffix=-eng]
-  subsandwicher apply --ass <merged.ass> --report <report.json> --out <out.ass> [--fix=<window>:<candidate> ...] [--fix-json=<fix object> ...]
+  subsandwicher apply --ass <merged.ass> --report <report.json> --out <out.ass> [--fix=<window>:<candidate> ...] [--fix-json=<fix object> ...] [--no-spoilers] [--reveal-window=N]
   subsandwicher boxes --ass <merged.ass> --time <seconds>
   subsandwicher <video-file> <primary-lang> <secondary-lang>
 
@@ -103,6 +103,7 @@ func cmdMerge(args []string) error {
 	out := fs.String("out", "", "output .ass path (defaults next to the video)")
 	report := fs.String("report", "", "decision log path (defaults to <out>.report.json)")
 	noExact := fs.Bool("no-exact", false, "skip libass ink masks; use estimated boxes only")
+	noSpoilers := fs.Bool("no-spoilers", false, "also write a scrambled preview for No Spoilers mode")
 	fs.StringVar(&video, "video", "", "input video file")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -124,7 +125,8 @@ func cmdMerge(args []string) error {
 	if outPath == "" {
 		outPath = filepath.Join(filepath.Dir(video), strings.TrimSuffix(filepath.Base(video), filepath.Ext(video))+".merged.ass")
 	}
-	stats, err := sandwicher.MergeTracks(video, *primaryIdx, *secondaryIdx, outPath, *report, !*noExact,
+	stats, err := sandwicher.MergeTracksOpts(video, *primaryIdx, *secondaryIdx, outPath, *report,
+		sandwicher.MergeOptions{Exact: !*noExact, NoSpoilers: *noSpoilers},
 		func(p sandwicher.Progress) {
 			// progress lines go to stderr (stdout is the JSON result contract)
 			if b, err := json.Marshal(p); err == nil {
@@ -290,6 +292,8 @@ func cmdApply(args []string) error {
 	out := fs.String("out", "", "output .ass")
 	var fixes fixList
 	var fixJSON fixJSONList
+	noSpoilers := fs.Bool("no-spoilers", false, "write the preview with scrambled text")
+	revealWindow := fs.Int("reveal-window", 0, "with --no-spoilers, leave this window's text unscrambled")
 	fs.Var(&fixes, "fix", "window:candidate (repeatable; candidate -1 keeps the original)")
 	fs.Var(&fixJSON, "fix-json", "fix object as JSON, including manual overrides/comments (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -300,7 +304,9 @@ func cmdApply(args []string) error {
 		return errors.New("apply requires -ass and -out")
 	}
 	allFixes := append([]sandwicher.Fix(fixes), []sandwicher.Fix(fixJSON)...)
-	res, err := sandwicher.ApplyFixes(*ass, *report, *out, allFixes)
+	res, err := sandwicher.ApplyFixesWithOptions(*ass, *report, *out, allFixes, sandwicher.ApplyOptions{
+		NoSpoilers: *noSpoilers, RevealWindow: *revealWindow,
+	})
 	if err != nil {
 		return err
 	}

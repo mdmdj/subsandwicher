@@ -115,24 +115,27 @@ type BoxSample struct {
 
 // EventDecision is the per-event log entry.
 type EventDecision struct {
-	ID         int         `json:"id"`
-	Track      string      `json:"track"`
-	Role       string      `json:"role"`
-	Style      string      `json:"style"`
-	Start      float64     `json:"start"`
-	End        float64     `json:"end"`
-	Text       string      `json:"text"`
-	Layer      int         `json:"layer"`
-	Align      int         `json:"align"`
-	Pos        *Point      `json:"pos,omitempty"`
-	Moving     bool        `json:"moving"`
-	Effect     string      `json:"effect,omitempty"`
-	BBox       Box         `json:"bbox"`
-	BBoxExact  bool        `json:"bboxExact"`
-	ExactBBox  *Box        `json:"exactBBox,omitempty"`
-	ExactSeek  float64     `json:"exactSeek,omitempty"`
-	Coverage   string      `json:"coverage,omitempty"`
-	BoxSamples []BoxSample `json:"boxSamples,omitempty"`
+	ID    int     `json:"id"`
+	Track string  `json:"track"`
+	Role  string  `json:"role"`
+	Style string  `json:"style"`
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
+	Text  string  `json:"text"`
+	// DisplayText is the scrambled form shown while No Spoilers mode is on.
+	// It is empty when the mode is off; the original Text is always preserved.
+	DisplayText string      `json:"displayText,omitempty"`
+	Layer       int         `json:"layer"`
+	Align       int         `json:"align"`
+	Pos         *Point      `json:"pos,omitempty"`
+	Moving      bool        `json:"moving"`
+	Effect      string      `json:"effect,omitempty"`
+	BBox        Box         `json:"bbox"`
+	BBoxExact   bool        `json:"bboxExact"`
+	ExactBBox   *Box        `json:"exactBBox,omitempty"`
+	ExactSeek   float64     `json:"exactSeek,omitempty"`
+	Coverage    string      `json:"coverage,omitempty"`
+	BoxSamples  []BoxSample `json:"boxSamples,omitempty"`
 	// Margin* let the UI derive the same layout anchor libass uses for \pos
 	// without depending on the estimated text width.
 	MarginL    float64        `json:"marginL,omitempty"`
@@ -266,10 +269,13 @@ type Summary struct {
 
 // Report is the full decision log for one job.
 type Report struct {
-	Version   int              `json:"version"`
-	Job       JobInfo          `json:"job"`
-	Tracks    *TrackInference  `json:"tracks,omitempty"`
-	Summary   Summary          `json:"summary"`
+	Version int             `json:"version"`
+	Job     JobInfo         `json:"job"`
+	Tracks  *TrackInference `json:"tracks,omitempty"`
+	Summary Summary         `json:"summary"`
+	// Spoiler is present only when No Spoilers mode produced a scrambled
+	// preview; the report itself still carries the original event text.
+	Spoiler   *SpoilerInfo     `json:"spoiler,omitempty"`
 	Events    []EventDecision  `json:"events"`
 	Conflicts []Conflict       `json:"conflicts"`
 	Windows   []ConflictWindow `json:"windows"`

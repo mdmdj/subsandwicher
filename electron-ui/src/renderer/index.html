@@ -19,6 +19,19 @@
     <div id="topbar">
       <div id="topbar-name"></div>
       <div class="topbar-actions">
+        <label id="spoiler-unlock-wrap" class="spoiler-unlock hidden"
+               title="No Spoilers on: slide left to reveal everything. Off: slide right to re-enable.">
+          <input id="spoiler-unlock" type="range" min="0" max="100" value="100" step="1"
+                 aria-label="Slide to turn No Spoilers mode off or back on">
+          <span id="spoiler-unlock-label">No Spoilers on — slide left to reveal everything</span>
+        </label>
+        <label id="spoiler-blur-default-wrap" class="spoiler-unlock hidden"
+               title="Default video blur for windows that do not have their own blur level">
+          <span>Default blur</span>
+          <input id="spoiler-blur-default" type="range" min="10" max="100" value="85" step="1"
+                 aria-label="Default video blur level">
+          <span id="spoiler-blur-default-label">85%</span>
+        </label>
         <button id="btn-change-langs" class="small hidden">Change languages</button>
         <button id="btn-eject" class="small">Eject</button>
         <button id="btn-save" class="primary hidden">Save merged subs</button>
@@ -40,6 +53,14 @@
           <div id="secondaryOptions"></div>
         </div>
       </div>
+      <label class="no-spoiler-toggle" id="no-spoiler-setup">
+        <input type="checkbox" id="opt-no-spoilers">
+        <span>
+          <strong>No Spoilers mode</strong> — blurs the video and scrambles subtitle text to
+          reduce the chance of getting spoiled while fixing placements. The saved file always
+          keeps the original text.
+        </span>
+      </label>
       <div class="setup-actions">
         <button id="btn-preview">Generate preview</button>
       </div>
@@ -86,7 +107,15 @@
               <button id="btn-pause-window" class="icon-btn" title="Pause (hold this frame)" aria-label="Pause" disabled></button>
               <button id="btn-stop-window" class="icon-btn" title="Stop" aria-label="Stop" disabled></button>
               <label><input type="checkbox" id="opt-loop" checked> Loop</label>
-              <label><input type="checkbox" id="opt-unmute"> Unmute</label>
+              <label id="unmute-label"><input type="checkbox" id="opt-unmute"> Unmute</label>
+              <label id="opt-blur-wrap" class="hidden" title="Blur radius for this window">Blur
+                <input type="range" id="opt-blur" min="10" max="100" value="85">
+                <span id="opt-blur-label">85%</span>
+              </label>
+              <button id="btn-blur-default" class="small minor hidden"
+                      title="Use the global default blur for this window">Use default</button>
+              <button id="btn-reveal-window" class="small hold-btn hidden"
+                      title="Click and hold to reveal this window's text and video">Hold to reveal window</button>
               <label>Speed
                 <select id="opt-speed">
                   <option value="0.25">0.25x</option>

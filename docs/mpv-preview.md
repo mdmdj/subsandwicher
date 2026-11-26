@@ -13,16 +13,24 @@ mpv.exe
   --input-ipc-server=<pipe path>       (host-unique: pid + counter + random)
   --vo=gpu-next --hwdec=auto-safe
   --keep-open=always --pause
-  --sub-auto=no                        (do not steal embedded subs)
+  --sid=no --sub-auto=no               (no embedded/sidecar sub track at launch)
+  --sub-visibility=no                  (no subtitle text on the first frame)
+  [--vf=lavfi=[gblur=sigma=N]]         (No Spoilers mode only)
   --osd-level=0 --osc=no               (kiosk-ish: no mpv UI over our control)
   --input-default-bindings=no --window-dragging=no
   <video path>
 ```
 
+The no-subtitle launch is deliberate: mpv can otherwise select the video's
+default embedded subtitle track before the controller attaches the review
+file, which would show a frame of untransformed text (critical in No Spoilers
+mode). Subtitles stay invisible until the explicit add below.
+
 Automatically retried with a **minimal** arg set (IPC + `--pause` +
-`--keep-open=always` + file only) if mpv exits within 3s — used to bisect an
-argument problem from a playback problem. `hwdec` is then restored over IPC,
-which can be set at runtime.
+`--keep-open=always` + the same `--sid=no --sub-auto=no
+--sub-visibility=no` + file only) if mpv exits within 3s — used to bisect an
+argument problem from a playback problem. `hwdec` and the blur are then
+restored over IPC, which can be set at runtime.
 
 ## IPC sequence
 
@@ -30,10 +38,15 @@ mpv creates the pipe before we can connect. The controller then semaphores
 this order (replies use `request_id`, matching the JSON line):
 
 ```
-sub-add <merged .ass path> select      # attach our external merged subs
+sub-add <merged .ass path> select      # attach our external merged (or scrambled) subs
+set sub-visibility yes                 # only now can subtitle text appear
 seek <seconds> absolute+exact          # frame-exact seek, no keyframe snaps
 set pause yes
 ```
+
+Switching No Spoilers mode on or off hides subtitles, loads the new file with
+`sub-add … select`, then shows them again. A failed load re-shows the old
+track rather than leaving the preview blank.
 
 `absolute+exact` is mandatory for preview correctness; `absolute+keyframes`
 snaps to nearby keyframes and routinely lands *outside* a short subtitle

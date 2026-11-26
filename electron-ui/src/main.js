@@ -10,7 +10,9 @@ const { launchPreviewSession } = require('./mpv-ipc');
 let mainWindow = null;
 let activeSession = null;
 let tempDir = null;
-let previewCtx = null; // { videoPath, mergedPath } for auto-relaunch after mpv death
+// { videoPath, mergedPath, previewPath, noSpoilers, seed, blurSigma, revealWindowId }
+// for auto-relaunch after mpv death.
+let previewCtx = null;
 const previewBoxCache = new Map(); // path|mtime|time -> current libass boxes
 const previewBoxInflight = new Map(); // same key -> in-flight promise
 let activeMergeProcess = null; // cli process for the running merge
@@ -211,6 +213,7 @@ async function ensurePreviewAt(videoPath, mergedPath, time) {
   if (activeSession) activeSession.quit();
   activeSession = await launchPreview({
     video: ctx.videoPath, mergedSub: ctx.previewPath || ctx.mergedPath, seekTo: time,
+    blurSigma: ctx.blurSigma || 0,
   });
   return true;
 }
@@ -349,8 +352,14 @@ function handleMpvDrag(args) {
   });
 }
 
-function applyArgs(assPath, reportPath, outPath, fixes) {
+function applyArgs(assPath, reportPath, outPath, fixes, opts = {}) {
   const args = ['apply', `--ass=${assPath}`, `--report=${reportPath}`, `--out=${outPath}`];
+  if (opts.noSpoilers) {
+    args.push('--no-spoilers');
+    if (Number.isInteger(opts.revealWindowId) && opts.revealWindowId > 0) {
+      args.push(`--reveal-window=${opts.revealWindowId}`);
+    }
+  }
   for (const f of fixes || []) {
     if (!f || !Number.isInteger(f.windowId)) continue;
     // Manual overrides and comments need the full object form.
@@ -363,14 +372,67 @@ function applyArgs(assPath, reportPath, outPath, fixes) {
   return args;
 }
 
+// Reload the preview in either plain (No Spoilers off) or scrambled form,
+// applying the current fixes. The merged source file is never written.
+async function setSpoilerMode(enabled, { seekTo, fixes, blurSigma } = {}) {
+  const ctx = previewCtx;
+  if (!ctx) return { ok: false, error: 'preview session is not ready' };
+  if (!ctx.reportPath) return { ok: false, error: 'this merge has no decision log' };
+  const sigma = enabled ? (Number(blurSigma) > 0 ? Number(blurSigma) : 0) : 0;
+  const outPath = tempFile(enabled ? 'preview-spoiler.ass' : 'preview-plain.ass');
+  try {
+    await stopPlayback();
+    await runCli(applyArgs(ctx.mergedPath, ctx.reportPath, outPath, fixes || [], {
+      noSpoilers: !!enabled,
+      revealWindowId: 0,
+    }), {});
+    if (activeSession && !activeSession.isDead()) {
+      // Hide the old track before loading the new one so switching from plain
+      // to scrambled (or back) cannot flash the previous text.
+      await activeSession.exec(['set', 'sub-visibility', 'no']);
+      try {
+        await activeSession.setBlur(sigma);
+        await activeSession.exec(['sub-add', outPath, 'select']);
+      } finally {
+        // If the add failed, show the old track again rather than a blank
+        // preview; the caller reports the switch as failed.
+        await activeSession.exec(['set', 'sub-visibility', 'yes']).catch(() => {});
+      }
+    } else {
+      activeSession = await launchPreview({
+        video: ctx.videoPath, mergedSub: outPath,
+        seekTo: typeof seekTo === 'number' ? seekTo : 0, blurSigma: sigma,
+      });
+    }
+    ctx.noSpoilers = !!enabled;
+    ctx.revealWindowId = 0;
+    ctx.blurSigma = sigma;
+    ctx.previewPath = outPath;
+    if (typeof seekTo === 'number') {
+      try { await activeSession.seek(seekTo); } catch (e) { log('warn', 'mode switch seek failed', e.message); }
+    }
+    log('info', enabled ? 'No Spoilers mode enabled' : 'No Spoilers mode disabled', {
+      previewPath: outPath, blurSigma: sigma, fixes: (fixes || []).length,
+    });
+    return { ok: true };
+  } catch (e) {
+    log('error', 'switching No Spoilers mode failed', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
 // Write a working copy with the accepted plus previewed fixes and reload it in
 // mpv. The original merged file is never modified.
-async function applyPreviewFixes(fixes, seekTo, keepPlaying) {
+async function applyPreviewFixes(fixes, seekTo, keepPlaying, revealWindowId) {
   const ctx = previewCtx;
   if (!ctx || !ctx.previewPath) return { ok: false, error: 'preview session is not ready' };
   if (!ctx.reportPath) return { ok: false, error: 'this merge has no decision log' };
   if (!keepPlaying) await stopPlayback();
-  const res = await runCli(applyArgs(ctx.mergedPath, ctx.reportPath, ctx.previewPath, fixes || []), {});
+  if (Number.isInteger(revealWindowId)) ctx.revealWindowId = revealWindowId;
+  const res = await runCli(applyArgs(ctx.mergedPath, ctx.reportPath, ctx.previewPath, fixes || [], {
+    noSpoilers: !!ctx.noSpoilers,
+    revealWindowId: ctx.revealWindowId,
+  }), {});
   let resumed = false;
   if (activeSession && !activeSession.isDead()) {
     await activeSession.reloadSubs();
@@ -384,6 +446,7 @@ async function applyPreviewFixes(fixes, seekTo, keepPlaying) {
   } else {
     activeSession = await launchPreview({
       video: ctx.videoPath, mergedSub: ctx.previewPath, seekTo: typeof seekTo === 'number' ? seekTo : 0,
+      blurSigma: ctx.blurSigma || 0,
     });
   }
   log('info', 'preview fixes applied', {
@@ -442,12 +505,14 @@ app.whenReady().then(() => {
     return { videoPath, streams };
   });
 
-  ipcMain.handle('merge-subtitles', async (_e, { videoPath, primaryIndex, secondaryIndex }) => {
-    log('info', 'merge request', { videoPath, primaryIndex, secondaryIndex });
+  ipcMain.handle('merge-subtitles', async (_e, { videoPath, primaryIndex, secondaryIndex, noSpoilers }) => {
+    log('info', 'merge request', { videoPath, primaryIndex, secondaryIndex, noSpoilers: !!noSpoilers });
     const outPath = defaultMergedPath(videoPath, primaryIndex, secondaryIndex);
-    const stats = await runCli(['merge', `--video=${videoPath}`,
+    const args = ['merge', `--video=${videoPath}`,
       `--primary-index=${primaryIndex}`, `--secondary-index=${secondaryIndex}`,
-      `--out=${outPath}`], {
+      `--out=${outPath}`];
+    if (noSpoilers) args.push('--no-spoilers');
+    const stats = await runCli(args, {
       track: true,
       onProgress: (p) => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('merge-progress', p);
@@ -467,6 +532,11 @@ app.whenReady().then(() => {
       });
     }
     stats.review = loadReview(stats);
+    if (noSpoilers && !stats.spoiler_preview) {
+      // Fail closed: never fall back to a plaintext preview when the user
+      // explicitly asked for No Spoilers mode.
+      throw new Error('No Spoilers mode was requested but the scrambled preview was not produced');
+    }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('merge-progress', {
         stage: 'done', overall: 1, message: 'review ready',
@@ -475,25 +545,42 @@ app.whenReady().then(() => {
     return stats;
   });
 
-  ipcMain.handle('launch-preview', async (_e, { videoPath, mergedPath, reportPath, seekTo }) => {
-    log('info', 'launch preview', { videoPath, mergedPath, seekTo });
+  ipcMain.handle('launch-preview', async (_e, { videoPath, mergedPath, reportPath, seekTo,
+    spoilerPath, noSpoilers, blurSigma, seed }) => {
+    log('info', 'launch preview', { videoPath, mergedPath, spoilerPath, seekTo, noSpoilers: !!noSpoilers });
     clearPlaybackTimer();
     if (activeSession) {
       log('info', 'existing session found; shutting it down first');
       activeSession.quit();
       activeSession = null;
     }
-    let previewPath = mergedPath;
+    const sourcePath = noSpoilers ? spoilerPath : mergedPath;
+    if (noSpoilers && !sourcePath) {
+      throw new Error('No Spoilers mode has no scrambled preview file');
+    }
+    let previewPath = sourcePath;
     try {
       previewPath = tempFile('preview.ass');
-      fs.copyFileSync(mergedPath, previewPath);
+      fs.copyFileSync(sourcePath, previewPath);
     } catch (e) {
+      if (noSpoilers) {
+        log('error', 'could not create scrambled preview working copy', e.message);
+        throw new Error('could not create the scrambled preview: ' + e.message);
+      }
       log('warn', 'could not create preview working copy; using the merged file', e.message);
-      previewPath = mergedPath;
+      previewPath = sourcePath;
     }
     const rep = reportPath || (fs.existsSync(mergedPath + '.report.json') ? mergedPath + '.report.json' : null);
-    previewCtx = { videoPath, mergedPath, previewPath, reportPath: rep };
-    activeSession = await launchPreview({ video: videoPath, mergedSub: previewPath, seekTo });
+    previewCtx = {
+      videoPath, mergedPath, previewPath, reportPath: rep,
+      noSpoilers: !!noSpoilers, seed: seed || 0,
+      blurSigma: Number(blurSigma) > 0 ? Number(blurSigma) : 0,
+      revealWindowId: 0,
+    };
+    activeSession = await launchPreview({
+      video: videoPath, mergedSub: previewPath, seekTo,
+      blurSigma: previewCtx.blurSigma,
+    });
     log('info', 'preview session ready (seekTo=' + seekTo + ')', { previewPath, reportPath: rep });
     // The review UI is the next step; keep it in front of the new mpv window.
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.focus();
@@ -533,15 +620,37 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle('apply-preview', async (_e, { fixes, seekTo, keepPlaying }) => {
-    log('info', 'apply preview fixes', { fixes, seekTo, keepPlaying });
+  ipcMain.handle('apply-preview', async (_e, { fixes, seekTo, keepPlaying, revealWindowId }) => {
+    log('info', 'apply preview fixes', { fixes, seekTo, keepPlaying, revealWindowId });
     try {
-      return await applyPreviewFixes(fixes, seekTo, keepPlaying);
+      return await applyPreviewFixes(fixes, seekTo, keepPlaying, revealWindowId);
     } catch (e) {
       log('error', 'apply preview failed', e.message);
       return { ok: false, error: e.message };
     }
   });
+
+  ipcMain.handle('set-preview-blur', async (_e, { sigma }) => {
+    if (!previewCtx) return { ok: false, error: 'preview session is not ready' };
+    const value = Number(sigma) > 0 ? Number(sigma) : 0;
+    previewCtx.blurSigma = value;
+    if (!activeSession || activeSession.isDead()) return { ok: true, sigma: value };
+    try {
+      await activeSession.setBlur(value);
+      return { ok: true, sigma: value };
+    } catch (e) {
+      log('warn', 'set preview blur failed', e.message);
+      return { ok: false, error: e.message, sigma: value };
+    }
+  });
+
+  // Global switch. Off reloads the original text; on reloads the scrambled
+  // preview. Both keep the user's chosen fixes and never write the source.
+  ipcMain.handle('spoiler-disable', async (_e, { seekTo, fixes }) =>
+    setSpoilerMode(false, { seekTo, fixes }));
+
+  ipcMain.handle('spoiler-enable', async (_e, { seekTo, fixes, blurSigma }) =>
+    setSpoilerMode(true, { seekTo, fixes, blurSigma }));
 
   ipcMain.handle('preview-boxes', async (_e, { time }) => {
     try {
@@ -638,7 +747,8 @@ app.whenReady().then(() => {
       }
       const session = activeSession;
       const speed = Number(payload.speed) > 0 ? Number(payload.speed) : 1;
-      const muted = payload.muted !== false;
+      // No Spoilers mode locks the preview muted: audio is a plot channel.
+      const muted = !!(previewCtx && previewCtx.noSpoilers) || payload.muted !== false;
       await session.exec(['set', 'mute', muted ? 'yes' : 'no']);
       await session.exec(['set', 'speed', String(speed)]);
       if (action === 'resume') {

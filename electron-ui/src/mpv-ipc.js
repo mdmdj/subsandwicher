@@ -7,11 +7,12 @@ const { binaries } = require('./bins');
 // Small client for mpv's JSON IPC protocol (input IPC server), with the
 // request/response and event plumbing we need to steer preview playback.
 class MpvSession {
-  constructor({ video, mergedSub, seekTo, scriptPath }) {
+  constructor({ video, mergedSub, seekTo, scriptPath, blurSigma = 0 }) {
     this.video = video;
     this.mergedSub = mergedSub;
     this.seekTo = seekTo;
     this.scriptPath = scriptPath;
+    this.blurSigma = Number(blurSigma) > 0 ? Number(blurSigma) : 0;
     this.proc = null;
     this.client = null;
     this.pipePath = getPipePath();
@@ -31,17 +32,36 @@ class MpvSession {
     const { mpv } = binaries();
     const scriptArgs = this.scriptPath ? [`--script=${this.scriptPath}`] : [];
     let args;
+    const blurArgs = this.blurSigma > 0
+      ? [`--vf=lavfi=[gblur=sigma=${Math.round(this.blurSigma)}]`]
+      : [];
     if (minimal) {
-      args = [...scriptArgs, ...argsForLaunch(this.pipePath), '--pause', '--keep-open=always', this.video];
+      args = [
+        ...scriptArgs,
+        ...argsForLaunch(this.pipePath),
+        '--pause',
+        '--keep-open=always',
+        // No subtitle may appear before our selected file is ready: no
+        // embedded track, no external auto-load, and no visible subs yet.
+        '--sid=no',
+        '--sub-auto=no',
+        '--sub-visibility=no',
+        this.video,
+      ];
     } else {
       args = [
         ...scriptArgs,
         ...argsForLaunch(this.pipePath),
+        ...blurArgs,
         '--vo=gpu-next',
         '--hwdec=auto-safe',
         '--keep-open=always',
         '--pause',
+        // No subtitle may appear before our selected file is ready: no
+        // embedded track, no external auto-load, and no visible subs yet.
+        '--sid=no',
         '--sub-auto=no',
+        '--sub-visibility=no',
         // kiosk-ish behavior: no OSD, no on-screen controller, no default
         // key bindings or mouse actions; our controller drives everything.
         '--osd-level=0',
@@ -86,8 +106,11 @@ class MpvSession {
     this.client.on('data', (d) => this.onData(d)).setEncoding('utf8');
     this.client.on('error', (e) => log('error', 'mpv IPC error', e.message));
     this.client.on('close', () => log('info', 'mpv IPC closed'));
-    // pipeline the post-load commands; exec them once file is loaded
+    // Load our subtitle file first, then make subtitles visible. Until this
+    // point mpv has sid=no/sub-visibility=no, so no embedded or sidecar track
+    // can flash the original text on the first frame.
     await this.exec(['sub-add', this.mergedSub, 'select']);
+    await this.exec(['set', 'sub-visibility', 'yes']);
     if (this.seekTo > 0) {
       await this.exec(['seek', this.seekTo, 'absolute+exact']);
     }
@@ -153,6 +176,13 @@ class MpvSession {
   seek(t) { return this.exec(['seek', t, 'absolute+exact']); }
   stepFrame(dir = 1) { return this.exec(['frame-step', dir]); }
   reloadSubs() { return this.exec(['sub-reload']); }
+  setBlur(sigma) {
+    this.blurSigma = Number(sigma) > 0 ? Number(sigma) : 0;
+    const vf = this.blurSigma > 0
+      ? `lavfi=[gblur=sigma=${Math.round(this.blurSigma)}]`
+      : '';
+    return this.exec(['set', 'vf', vf]);
+  }
   anotherRandomFrame(t) { return this.seek(t); }
   isDead() { return this.dead || !this.proc || this.proc.killed; }
 
@@ -192,6 +222,9 @@ async function launchPreviewSession(opts) {
     await session.connect();
     for (const [k, v] of [['hwdec', 'auto-safe']]) {
       try { await session.exec(['set', k, v]); } catch (e) { log('warn', `set ${k} failed: ${e.message}`); }
+    }
+    if (session.blurSigma > 0) {
+      try { await session.setBlur(session.blurSigma); } catch (e) { log('warn', 'set blur failed', e.message); }
     }
     await session.exec(['set', 'pause', 'yes']);
   } else {

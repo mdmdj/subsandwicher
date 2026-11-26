@@ -164,6 +164,51 @@ leave the safe area/frame and shows an estimated re-check of conflicts still
 touching changed events. Applying a candidate for preview and save goes through the CLI
 `apply` command; mpv remains a dumb pixel renderer under controller command.
 
+## No Spoilers mode
+
+Optional at language finalization, before the merge/preview starts. It is a
+presentation layer, not a data lock: the merged `.ass`, the decision log and
+the saved review session keep the original text; opening them will spoil.
+
+- **Video**: mpv gets a `gblur` video filter sized from the probed video height
+  (default 85% of a `height * 0.10` sigma). The filter is in the launch args so
+  the first frame never appears sharp. A top-bar **Default blur** slider sets
+  the level for every window that does not have its own override; the toolbar
+  slider stores a per-window override, and **Use default** clears it so the
+  window follows the global value again.
+- **No subtitle flash**: mpv starts with `--sid=no --sub-auto=no
+  --sub-visibility=no`, so an embedded or sidecar track cannot render on the
+  first frame. The scrambled file is added with `sub-add … select` and only
+  then are subtitles made visible. Switching the global veil on or off hides
+  the old track before loading the new one for the same reason.
+- **Text in mpv**: `merge --no-spoilers` writes a sibling
+  `<out>.spoiler.ass` whose visible text is replaced by width-matched
+  consonant gibberish with combining marks. Override tags, `\N` breaks, spaces
+  and vector drawings are preserved; each word is filled to the original's
+  advance width (Arial-style table; Latin text is the supported target, and
+  decorative or monospaced fonts will drift), so spaces and line lengths stay
+  put while character counts change. The seed is per merge and stored in the report;
+  `apply --no-spoilers` reuses it so preview reloads stay identical. The
+  report's `events[].displayText` is the same scrambled string for the review
+  headings.
+- **Text in the review UI**: headings, event details and the raw ASS text use
+  `displayText`; the raw line keeps its metadata and only the Text field is
+  replaced.
+- **Reveal**: a 0.9 s click-and-hold on **Hold to reveal window** rewrites the
+  preview with only that window's events unscrambled and removes the blur;
+  selecting another window re-locks it. The top-bar global switch has the veil
+  on at the right: slide left to turn it off (reload the original text and
+  remove the filter) and slide right to turn it back on (reload the scrambled
+  preview at the current window's blur level). Both gestures are deliberately
+  more effort than a click, not a security boundary.
+- **Audio is locked muted** while the mode is on.
+- **Save** never passes `--no-spoilers`: the final file is the original text
+  with fixes applied. The normal apply path is byte-identical when no fixes are
+  chosen.
+
+Failure: if the scrambled preview cannot be produced or copied, the preview
+fails instead of falling back to the plaintext merged file.
+
 ## Kiosk policy and input
 
 mpv window has no hotkeys, no OSD, no right-click menu; we deliberate so that

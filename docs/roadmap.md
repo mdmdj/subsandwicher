@@ -79,6 +79,11 @@ original evidence.
 - [x] Copy state / copy all with chosen fixes, comments, statuses, report and
       raw ASS lines.
 - [x] Portable Windows build via `tools/build-windows.sh`.
+- [x] No Spoilers mode: resolution-scaled video blur, width-matched scrambled
+      preview text with a stable per-merge seed, locked mute, per-window
+      click-and-hold reveal, a bidirectional whole-session slide switch, and a
+      global default blur with per-window overrides. Save and the review log
+      keep the original text; see `app-flow.md`.
 
 ### Testing
 

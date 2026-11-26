@@ -22,9 +22,9 @@ npm start                              # uses SUBS_BIN_* overrides or PATH
 
 ## Layout
 
-- `main.go` — CLI (`probe`, `merge`, `report`, `apply`; `merge` also accepts named args and the classic `video lang lang` form). JSON on stdout is the GUI contract.
-- `sandwicher/` — subtitle logic (parse, track pick, merge, ffmpeg extraction + progress) plus `geometry.go`/`tracks.go`/`conflict.go`/`placement.go` (role classification, track inference, box estimation, conflict windows, placement candidates, per-event decision log). Tests in `ass_test.go`, `conflict_test.go`; `corpus_test.go` runs when `SUBS_CORPUS_DIR` is set.
-- `electron-ui/src/` — `main.js` (orchestration), `preload.js` (bindings whitelist), `renderer/` (UI), `mpv-ipc.js` + `ipc-paths.js` (mpv control), `mpv-drag.lua` (preview click/drag/arrow input), `bins.js` (binary lookup), `logger.js`.
+- `main.go` — CLI (`probe`, `merge`, `report`, `apply`; `merge` also accepts named args and the classic `video lang lang` form). `merge --no-spoilers` also writes a scrambled preview; `apply --no-spoilers [--reveal-window=N]` rewrites a preview for No Spoilers mode. JSON on stdout is the GUI contract.
+- `sandwicher/` — subtitle logic (parse, track pick, merge, ffmpeg extraction + progress) plus `geometry.go`/`tracks.go`/`conflict.go`/`placement.go` (role classification, track inference, box estimation, conflict windows, placement candidates, per-event decision log) and `spoiler.go` (deterministic width-matched text scrambling for the visual preview). Tests in `ass_test.go`, `conflict_test.go`, `spoiler_test.go`; `corpus_test.go` runs when `SUBS_CORPUS_DIR` is set.
+- `electron-ui/src/` — `main.js` (orchestration, preview working copies and No Spoilers mode switching), `preload.js` (bindings whitelist), `renderer/` (UI, including the global veil switch and per-window blur controls), `mpv-ipc.js` + `ipc-paths.js` (mpv control; launches with subtitles disabled until the selected file is attached), `mpv-drag.lua` (preview click/drag/arrow input), `bins.js` (binary lookup), `logger.js`.
 - `docs/decision-log.md` — decision-log schema, levels, surface policy and filters.
 - `docs/roadmap.md` — what is done, feedback polish and next efforts.
 - `docs/review-feedback.md` — notes from a real review session.

@@ -34,6 +34,34 @@ matching and run the no-label track classifier. A scan has no transform
 decisions, but it still classifies roles and tracks, estimates boxes and
 produces conflicts and windows.
 
+## No Spoilers preview
+
+`merge --no-spoilers` keeps the normal merged file and decision log, but also
+writes a sibling `<out>.spoiler.ass` and records the presentation-only
+mapping in the report:
+
+```json
+"spoiler": { "enabled": true, "seed": 3528110173,
+             "preview": "/tmp/subsandwicher-xxxx/merge.0-1.spoiler.ass" }
+```
+
+Every event gains `displayText`, the scrambled string the review UI shows
+while the veil is up. The original `text`, `raw` line and full report are
+still present: No Spoilers is a visual layer, not a data lock (see
+`app-flow.md`).
+
+The scramble is deterministic per `(seed, event index)`. It preserves override
+tags, spaces, `\N` breaks and vector drawings, and fills each word to the
+original advance width, so line lengths and space positions stay put while
+character counts change. Latin text is the supported target; the width table
+is Arial-style, so decorative or monospaced fonts drift.
+
+`apply --no-spoilers` reads `spoiler.seed` and applies the same mapping to the
+output after the chosen fixes. `apply --no-spoilers --reveal-window=N` leaves
+the events in `windows[N].events` unscrambled. The save path never passes
+these flags, so the file written next to the video keeps the original text;
+with no fixes, normal `apply` remains byte-identical.
+
 ## Levels
 
 `level` is an integer plus `levelName`:
